@@ -1,0 +1,30 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apple clang
+        run: make clean test CC=clang
+      - name: demo
+        run: make clean demo CC=clang
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: gcc
+        run: make clean test
+      - name: clang
+        run: make clean test CC=clang
+      - name: ASan + UBSan
+        run: make clean asan
+      - name: ThreadSanitizer
+        run: make clean tsan
+      - name: macOS clock path
+        run: make clean portable
+      - name: demo
+        run: make clean demo
