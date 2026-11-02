@@ -82,11 +82,12 @@ flowchart TD
 | Piece | Behaviour |
 |---|---|
 | **Pushbuffer** | 32-bit method stream: header `[31:24] opcode, [23:0] arg count` + args. Builders refuse to overflow a segment. |
-| **GPFIFO** | Per-channel ring of 16 segments. `gpu_submit` returns `-EAGAIN` when full (back-pressure), `-EIO` once faulted. |
+| **GPFIFO** | Per-channel lock-free SPSC ring of 16 segments with `_Atomic` `GP_PUT` / `GP_GET` (acquire/release, see design notes). `gpu_submit` returns `-EAGAIN` when full (back-pressure), `-EIO` once faulted. Many host threads may share a channel; a per-channel submit lock makes them one producer. |
 | **Semaphores** | 64 x 32-bit, compared wrap-safe (`(int32_t)(cur - want) >= 0`). Used for host fences and channel-to-channel dependencies. |
 | **Scheduling** | One entry per timeslice, round-robin. An unmet `ACQUIRE` parks the channel with its cursor saved; it becomes runnable only when the semaphore is reached. |
 | **Fault isolation** | Unknown opcode, wrong arg count, truncated method, out-of-range VRAM or semaphore id each fault *only* the offending channel. |
 | **Watchdog** | Checks every `timeout/4`; if one entry has held the engine longer than `timeout`, it faults that channel and kicks the engine. Detection latency is therefore `timeout` to `1.25 x timeout`. |
+| **Acquire timeout** | `gpu_set_acquire_timeout(dev, ms)`: a channel parked on an unmet `ACQUIRE` for longer than `ms` is faulted with `FAULT_ACQUIRE_TIMEOUT`, so a consumer whose producer died does not wait forever. Off by default; a waiter whose semaphore is met in time is never faulted. |
 | **Recovery** | `gpu_channel_recover()` clears the fault and empties the ring so the channel can be reused, refusing with `-EBUSY` while it is still on the engine. |
 
 ## Build & test
@@ -102,7 +103,7 @@ make demo
 
 Runs on Linux and macOS with no GPU required. CI builds on both `ubuntu-latest` and `macos-latest`.
 
-61 checks across 8 tests, all passing under gcc, clang, ASan/UBSan and TSan, including 50 repeated TSan runs and 8 concurrent instances under CPU contention:
+93 checks across 11 tests, all passing under gcc, clang, ASan/UBSan and TSan, including repeated TSan runs and 8 concurrent instances under CPU contention:
 
 | Test | Proves |
 |---|---|
@@ -114,17 +115,27 @@ Runs on Linux and macOS with no GPU required. CI builds on both `ubuntu-latest` 
 | `gpfifo_backpressure` | Ring-full returns `-EAGAIN`; clean shutdown while channels are stalled |
 | `pushbuffer_builder_bounds` | Builders never write past a segment |
 | `multithreaded_stress` | 4 host threads x 400 submissions with retries: every entry retires, zero faults |
+| `shared_channel_many_producers` | 4 host threads x 300 submissions on *one* channel: no lost or torn entry, per-thread order kept |
+| `acquire_timeout_dead_producer` | Producer faults before releasing; consumer is faulted within the window, healthy channel unaffected, consumer reusable |
+| `acquire_timeout_spares_live_waiters` | Off by default (long wait survives); when on, a slow-but-alive producer's consumer is not killed |
 
 ## Design notes
 
-- **One device mutex.** All channel state and semaphores are guarded by it; VRAM is not. Ordering between host and engine comes from `gpu_submit` and `SEM_RELEASE`, both of which pass through the mutex, the same happens-before role a memory barrier plays before a real semaphore release.
+- **Lock-free ring, explicit memory ordering.** Work moves through each GPFIFO without the device lock, as on hardware where the host only writes `GP_PUT`:
+  - host writes the segment, then **release**-stores `GP_PUT` (the write barrier before the real `GP_PUT` / doorbell write);
+  - engine **acquire**-loads `GP_PUT`, so the segment is fully visible before it reads it, then **release**-stores `GP_GET + 1` when done;
+  - host **acquire**-loads `GP_GET` before reusing a slot, so it never overwrites a segment the engine is still reading.
+
+  Indices are free-running `uint32_t`, so fullness is `put - get >= 16` and survives wraparound. The device mutex now guards only scheduler state, semaphores and stats; the doorbell takes it briefly so the engine's condvar sleep cannot miss a wakeup (a real engine is woken by a register write, not a condvar).
+- **Faults vs. in-flight submits.** A host may publish an entry just after its channel faults. That entry is dead: the engine skips faulted channels, `idle_wait` treats a faulted channel as idle once it is off the engine, and `recover` (holding the submit lock, so `GP_PUT` is frozen) discards everything up to `GP_PUT`.
 - **A fence fires mid-entry.** `SEM_RELEASE` is visible before the GPFIFO entry that contains it retires. Code that needs "entry fully retired" (e.g. reading stats) uses `gpu_channel_idle_wait()`. The stress test originally failed 2 runs in 20 by mixing these up, which is why it is documented here.
-- **Hang vs. slow.** The watchdog cannot tell a stuck shader from a very long legitimate copy; both are faulted once they exceed the timeout. Real drivers face the same trade-off, which is why the timeout is configurable.
+- **Hang vs. slow.** The watchdog cannot tell a stuck shader from a very long legitimate copy; both are faulted once they exceed the timeout. Real drivers face the same trade-off, which is why the timeout is configurable. The acquire timeout has the same trade-off for a slow producer, which is why it is opt-in.
 
 ## Limitations / next steps
 
 - Single engine (no separate copy engine); no preemption inside a method.
-- No timeout on a channel parked on `ACQUIRE`, so if the producer channel faults the consumer waits forever. Real hardware has acquire timeouts; this is the next feature.
+- Simplified method header and GPFIFO entries. Real NVIDIA headers carry subchannel, method address, count and incrementing/non-incrementing mode, and a GPFIFO entry is a GPU virtual address + length pointing at a pushbuffer, not a copy of it.
+- No runlists / TSGs or channel priorities; scheduling is plain round-robin.
 - No virtual memory / page faults.
 
 ## License

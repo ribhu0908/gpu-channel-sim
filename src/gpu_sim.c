@@ -75,6 +75,7 @@ typedef struct {
     bool            waiting;        /* parked on an unmet ACQUIRE           */
     uint32_t        wait_sem;
     uint32_t        wait_val;
+    uint64_t        wait_since_ms;  /* when it parked (acquire timeout)     */
     bool            reset_req;      /* watchdog asked engine to abort       */
 } channel_t;
 
@@ -95,6 +96,7 @@ struct gpu_dev {
     channel_t      *active;         /* entry currently on the engine        */
     uint64_t        active_since_ms;
     uint32_t        watchdog_ms;
+    uint32_t        acquire_timeout_ms;     /* 0 = disabled                 */
 
     uint8_t        *vram;
     size_t          vram_size;
@@ -200,6 +202,7 @@ const char *gpu_ch_status_str(gpu_ch_status_t s)
     case GPU_CH_FAULT_INVALID_METHOD: return "FAULT_INVALID_METHOD";
     case GPU_CH_FAULT_BAD_ADDRESS:    return "FAULT_BAD_ADDRESS";
     case GPU_CH_FAULT_TIMEOUT:        return "FAULT_TIMEOUT";
+    case GPU_CH_FAULT_ACQUIRE_TIMEOUT: return "FAULT_ACQUIRE_TIMEOUT";
     }
     return "UNKNOWN";
 }
@@ -273,6 +276,7 @@ static exec_result_t exec_entry(gpu_dev_t *d, channel_t *c, uint32_t get,
                 c->waiting  = true;                 /* park; cursor kept  */
                 c->wait_sem = a[0];
                 c->wait_val = a[1];
+                c->wait_since_ms = now_ms();
             }
             pthread_mutex_unlock(&d->lock);
             if (!ready)
@@ -406,15 +410,48 @@ static void *engine_main(void *arg)
 }
 
 /* ----------------------------------------------------------- watchdog */
+/* Lock held. Check every quarter of the shortest enabled timeout, so a
+ * timeout is detected within 1.25x its configured value. */
+static uint32_t watchdog_period(const gpu_dev_t *d)
+{
+    uint32_t t = d->watchdog_ms;
+    if (d->acquire_timeout_ms != 0 && d->acquire_timeout_ms < t)
+        t = d->acquire_timeout_ms;
+    return t / 4u ? t / 4u : 1u;
+}
+
+/* Lock held. Fault channels parked on an ACQUIRE that is still unmet after
+ * the acquire timeout. A parked channel is off the engine, so it can be torn
+ * down right here; the active one is skipped (the hang check covers it). */
+static void check_acquire_timeouts(gpu_dev_t *d)
+{
+    if (d->acquire_timeout_ms == 0)
+        return;
+    uint64_t now = now_ms();
+    for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++) {
+        channel_t *c = &d->ch[i];
+        if (!atomic_load(&c->open) || atomic_load(&c->status) != GPU_CH_OK ||
+            !c->waiting || d->active == c)
+            continue;
+        if (sem_reached(d->sem[c->wait_sem], c->wait_val))
+            continue;                   /* satisfied, just not rescheduled */
+        if (now - c->wait_since_ms >= d->acquire_timeout_ms) {
+            d->stats.acquire_timeouts++;
+            fault_channel(d, c, GPU_CH_FAULT_ACQUIRE_TIMEOUT);
+        }
+    }
+}
+
 static void *watchdog_main(void *arg)
 {
     gpu_dev_t *d = arg;
-    uint32_t period = d->watchdog_ms / 4u ? d->watchdog_ms / 4u : 1u;
 
     pthread_mutex_lock(&d->lock);
     while (d->running) {
-        struct timespec ts = deadline_after(period);
+        struct timespec ts = deadline_after(watchdog_period(d));
         pthread_cond_timedwait(&d->wd_cv, &d->lock, &ts);
+
+        check_acquire_timeouts(d);
 
         channel_t *c = d->active;
         if (c != NULL && !c->reset_req &&
@@ -668,6 +705,14 @@ int gpu_vram_read(gpu_dev_t *d, uint32_t off, void *dst, uint32_t len)
         return -EINVAL;
     memcpy(dst, d->vram + off, len);
     return 0;
+}
+
+void gpu_set_acquire_timeout(gpu_dev_t *d, uint32_t ms)
+{
+    pthread_mutex_lock(&d->lock);
+    d->acquire_timeout_ms = ms;
+    pthread_cond_broadcast(&d->wd_cv);  /* re-arm the watchdog period now */
+    pthread_mutex_unlock(&d->lock);
 }
 
 void gpu_get_stats(gpu_dev_t *d, gpu_stats_t *out)
