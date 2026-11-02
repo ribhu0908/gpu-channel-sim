@@ -1,5 +1,7 @@
 # gpu-channel-sim
 
+[![ci](https://github.com/ribhu0908/gpu-channel-sim/actions/workflows/ci.yml/badge.svg)](https://github.com/ribhu0908/gpu-channel-sim/actions/workflows/ci.yml)
+
 A C11 + pthreads model of how a GPU consumes work from many clients at once: **GPFIFO channels, pushbuffer methods, semaphore fences, round-robin channel scheduling, and watchdog-driven channel recovery**. Built to reason about, and test, the firmware/driver logic that sits between "the host submitted work" and "the engine finished it", the part where hangs, bad commands and cross-channel deadlocks have to be survived.
 
 > This is a host-side simulator for learning and testing scheduling and recovery logic. It does not talk to real GPU hardware. The concepts follow the publicly documented NVIDIA / nouveau channel model (GPFIFO, GP_GET/GP_PUT, semaphore acquire/release).
