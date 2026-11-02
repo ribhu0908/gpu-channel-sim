@@ -306,6 +306,68 @@ static void test_multithreaded_stress(void)
     gpu_destroy(g);
 }
 
+/* 4 host threads share ONE channel. submit_lock must serialise them into a
+ * single producer: no lost entry, no torn segment, per-thread order kept. */
+#define SHARED_THREADS 4
+#define SHARED_ITERS   300
+
+typedef struct { gpu_dev_t *g; unsigned ch; uint32_t id; uint32_t retries; } shared_arg_t;
+
+static void *shared_worker(void *p)
+{
+    shared_arg_t *a = p;
+    gpu_pb_t pb;
+    for (uint32_t i = 1; i <= SHARED_ITERS; i++) {
+        pb_reset(&pb);
+        pb_fill(&pb, a->id * 64u, (uint8_t)i, 64);
+        pb_sem_release(&pb, a->id, i);          /* must rise monotonically */
+        int rc;
+        while ((rc = gpu_submit(a->g, a->ch, &pb)) == -EAGAIN) {
+            struct timespec ts = { 0, 100000L };    /* 100 us */
+            a->retries++;
+            nanosleep(&ts, NULL);
+        }
+        if (rc != 0)
+            return (void *)1;
+    }
+    return NULL;
+}
+
+static void test_shared_channel_many_producers(void)
+{
+    gpu_dev_t *g = gpu_create(SHARED_THREADS * 64, 500);
+    unsigned ch;
+    gpu_channel_open(g, &ch);
+    pthread_t t[SHARED_THREADS];
+    shared_arg_t a[SHARED_THREADS];
+
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        a[i] = (shared_arg_t){ g, ch, i, 0 };
+        pthread_create(&t[i], NULL, shared_worker, &a[i]);
+    }
+    int errors = 0;
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        errors += r != NULL;
+    }
+    CHECK(errors == 0);
+    CHECK(gpu_channel_idle_wait(g, ch, 5000) == 0);
+
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        CHECK(gpu_sem_read(g, i) == SHARED_ITERS);
+        uint8_t buf[64];
+        gpu_vram_read(g, i * 64u, buf, sizeof buf);
+        CHECK(buf[0] == (uint8_t)SHARED_ITERS && buf[63] == (uint8_t)SHARED_ITERS);
+    }
+    gpu_stats_t s;
+    gpu_get_stats(g, &s);
+    CHECK(s.entries_done == SHARED_THREADS * SHARED_ITERS);
+    CHECK(s.methods_done == 2u * SHARED_THREADS * SHARED_ITERS);
+    CHECK(s.faults == 0);
+    gpu_destroy(g);
+}
+
 int main(void)
 {
     RUN(test_fill_copy_and_fence);
@@ -316,6 +378,7 @@ int main(void)
     RUN(test_gpfifo_backpressure);
     RUN(test_pushbuffer_builder_bounds);
     RUN(test_multithreaded_stress);
+    RUN(test_shared_channel_many_producers);
 
     printf("\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
