@@ -6,6 +6,24 @@ A C11 + pthreads model of how a GPU consumes work from many clients at once: **G
 
 > This is a host-side simulator for learning and testing scheduling and recovery logic. It does not talk to real GPU hardware. The concepts follow the publicly documented NVIDIA / nouveau channel model (GPFIFO, GP_GET/GP_PUT, semaphore acquire/release).
 
+## Live demo
+
+**[GPU Channel Lab](https://ribhu0908.github.io/gpu-channel-sim/)** is an interactive 3D model of this simulator: four channels feed one engine, with a guided tour, the real C functions lighting up as events happen, a memory-ordering lesson, and the benchmark below. Open `docs/index.html` locally or serve it with GitHub Pages (Settings, Pages, deploy from branch, folder `/docs`).
+
+The page is a JavaScript re-implementation of the scheduler logic for visualisation. It does not run the C code.
+
+### Benchmark
+
+`bench/bench.c` measures host-side `gpu_submit` cost and end-to-end throughput against any revision. On a shared 4-vCPU container (7 runs, 100,000 NOP entries per thread, medians of two rounds):
+
+| Case | device mutex | atomic ring |
+|---|---|---|
+| 1 thread, 1 channel | 728 ns/submit | 939 ns/submit |
+| 4 threads, one channel each | 3.98 us | 2.54 us |
+| 4 threads, one shared channel | 4.25 us | 23.7 us |
+
+The atomic ring is faster when threads use separate channels and slower on a shared one, because `gpu_submit` rings the doorbell while holding `submit_lock`. Ringing it after the unlock (not yet applied here) brought the shared case to about 3.9 us in a scratch experiment.
+
 ## Demo
 
 ```

@@ -1,0 +1,1740 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="description" content="GPU Channel Lab: an interactive 3D model of how a GPU engine shares work between channels, with a guided tour, live C code, benchmarks and interview prep.">
+<meta property="og:title" content="GPU Channel Lab">
+<meta property="og:description" content="Interactive 3D model of a GPU channel scheduler, built on the gpu-channel-sim C simulator.">
+<meta name="theme-color" content="#060912">
+<style>[hidden]{display:none!important}</style>
+<title>GPU Channel Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;600&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* Concept: a dark control room. The whole page is one 3D scene; panels are glass floating over it.
+   Each channel keeps one neon hue from ring to engine to memory. Single dark look by choice. */
+:root{
+  --bg:#060912; --ink:#E8EEF8; --muted:#8D9AB5; --line:rgba(255,255,255,.10);
+  --glass:rgba(10,15,32,.62); --glass2:rgba(255,255,255,.06);
+  --c0:#3DA5FF; --c1:#FFA23A; --c2:#38F2B4; --c3:#B77CFF;
+  --accent:#8FA8FF; --bad:#FF4D6A; --warn:#FFD166; --ok:#38F2B4;
+  --font-ui:'Instrument Sans',system-ui,-apple-system,'Segoe UI',sans-serif;
+  --font-display:'Unbounded','Instrument Sans',system-ui,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;overflow:hidden}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-ui);font-size:14px;line-height:1.45;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+canvas#gl{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab}
+canvas#gl.hover{cursor:pointer}
+canvas#gl.drag{cursor:grabbing}
+button{font:inherit;color:var(--ink);background:var(--glass2);border:1px solid var(--line);border-radius:999px;padding:7px 14px;cursor:pointer;min-height:34px;backdrop-filter:blur(10px)}
+button:hover{border-color:rgba(255,255,255,.35)}
+button:focus-visible,select:focus-visible,input:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);border-color:var(--accent);color:#08101f;font-weight:600}
+button svg{width:12px;height:12px;vertical-align:-1px;margin-right:6px;fill:currentColor}
+
+/* HUD */
+.glass{background:var(--glass);border:1px solid var(--line);border-radius:14px;backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);box-shadow:0 10px 40px rgba(0,0,0,.35)}
+.top{position:fixed;z-index:5;top:max(12px,env(safe-area-inset-top,0px));left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-start;justify-content:space-between;pointer-events:none}
+.brand{pointer-events:none;min-width:0}
+.brand h1{margin:0;font-family:var(--font-display);font-weight:600;font-size:clamp(17px,2.6vw,24px);letter-spacing:-.01em;line-height:1.1;text-shadow:0 0 24px rgba(143,168,255,.55)}
+.brand p{margin:4px 0 0;color:var(--muted);font-size:12px;max-width:46ch}
+nav#scenarios{display:flex;gap:6px;flex-wrap:wrap;pointer-events:auto;max-width:100%}
+nav#scenarios button{display:flex;flex-direction:column;align-items:flex-start;gap:0;text-align:left;padding:6px 12px;border-radius:12px}
+nav#scenarios b{font-size:13px;font-weight:600}
+nav#scenarios span{font-size:11px;color:var(--muted)}
+nav#scenarios button[aria-pressed="true"]{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 22px rgba(143,168,255,.35);background:rgba(143,168,255,.12)}
+
+.dock{position:fixed;z-index:5;left:max(16px,env(safe-area-inset-left,0px));bottom:max(16px,env(safe-area-inset-bottom,0px));
+  width:min(780px,calc(100% - 32px - 352px));display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.dock>*{pointer-events:auto}
+.caption{padding:0}
+.caption summary{list-style:none;cursor:pointer;padding:9px 14px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;display:flex;justify-content:space-between}
+.caption summary::-webkit-details-marker{display:none}
+.caption summary::after{content:"hide";text-transform:none;letter-spacing:0;font-weight:400}
+.caption:not([open]) summary::after{content:"show"}
+.caption p{margin:0;padding:0 14px 12px;text-wrap:pretty;max-width:88ch}
+.transport{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px}
+.transport label{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:12px}
+.transport select{font:inherit;background:var(--glass2);color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:5px 8px;min-height:32px}
+.transport select option{background:#0d1428;color:var(--ink)}
+.transport input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent)}
+.transport .sp{flex:1}
+.clock{font-family:var(--font-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:11ch;text-align:right}
+#panelBtn{display:none}
+
+.panel{position:fixed;z-index:6;top:calc(max(12px,env(safe-area-inset-top,0px)) + 84px);right:max(16px,env(safe-area-inset-right,0px));bottom:max(16px,env(safe-area-inset-bottom,0px));width:336px;
+  padding:14px;overflow:auto;transform:perspective(1500px) rotateY(-4deg);transform-origin:right center;transition:transform .3s}
+.panel:hover{transform:perspective(1500px) rotateY(0deg)}
+.panel h2{margin:0 0 8px;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.panel section+section{margin-top:16px}
+.panel .close{display:none;padding:2px 10px;min-height:28px}
+.chrow{display:grid;grid-template-columns:1fr auto;gap:6px 8px;padding:8px 0;border-top:1px solid var(--line);--cc:var(--c0);align-items:center}
+.chrow:first-of-type{border-top:0}
+.chrow .nm{display:flex;gap:8px;align-items:center;font-weight:600;min-width:0}
+.chrow .dot{width:9px;height:9px;border-radius:50%;background:var(--cc);box-shadow:0 0 10px var(--cc)}
+.pill{font-family:var(--font-mono);font-size:10px;font-weight:600;letter-spacing:.05em;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.pill.run{color:#08101f;background:var(--cc);border-color:var(--cc)}
+.pill.parked{color:var(--warn);border-color:var(--warn)}
+.pill.fault{color:var(--bad);border-color:var(--bad)}
+.pill.queued{color:var(--ink)}
+.chrow .acts{grid-column:1/-1;display:flex;gap:5px;flex-wrap:wrap}
+.chrow .acts button{font-size:12px;padding:3px 10px;min-height:28px}
+.stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 10px;margin:0}
+.stats div{display:flex;flex-direction:column}
+.stats dt{font-size:10px;color:var(--muted)}
+.stats dd{margin:0;font-family:var(--font-mono);font-size:17px;font-variant-numeric:tabular-nums}
+.log{margin:0;padding:0;list-style:none;font-family:var(--font-mono);font-size:11px;line-height:1.5;max-height:260px;overflow:auto;display:flex;flex-direction:column;gap:2px}
+.log li{display:grid;grid-template-columns:6.5ch 1fr;gap:8px}
+.log time{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.log .warn{color:var(--warn)} .log .err{color:var(--bad)} .log .ok{color:var(--ok)}
+.log span{overflow-wrap:anywhere}
+/* guide */
+.tourbtn{background:linear-gradient(135deg,rgba(143,168,255,.3),rgba(183,124,255,.25))!important;border-color:var(--accent)!important}
+.tourbtn b{font-size:13px}
+.dock.tour .caption,.dock.tour .transport{display:none}
+.tourcard{padding:14px 16px 14px}
+.tourcard[hidden]{display:none}
+.tc-head{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.tc-step{font-family:var(--font-mono);font-size:11px;color:var(--muted);letter-spacing:.06em;white-space:nowrap}
+.tc-dots{display:flex;gap:5px;flex:1;min-width:0;flex-wrap:wrap}
+.tc-dots i{width:18px;height:4px;border-radius:2px;background:var(--glass2);border:0;display:block}
+.tc-dots i.on{background:var(--accent);box-shadow:0 0 10px var(--accent)}
+.tc-dots i.done{background:rgba(143,168,255,.45)}
+.tourcard h2{margin:0 0 6px;font-size:19px;font-weight:600;letter-spacing:-.01em;text-wrap:balance}
+.tourcard p{margin:0;font-size:14.5px;text-wrap:pretty;max-width:80ch}
+.tc-tech{margin-top:10px;border-top:1px solid var(--line);padding-top:8px}
+.tc-tech summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:600;letter-spacing:.04em}
+.tc-tech p{margin-top:6px;font-size:13px;color:var(--muted);font-family:var(--font-mono);line-height:1.55}
+.tc-sum{margin:10px 0 0;padding:0 0 0 18px;font-size:13.5px;display:flex;flex-direction:column;gap:3px}
+.tc-nav{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;align-items:center}
+.tc-nav .sp{flex:1}
+.intro{position:fixed;inset:0;z-index:30;display:grid;place-items:center;padding:16px;background:rgba(3,5,12,.6);backdrop-filter:blur(7px);-webkit-backdrop-filter:blur(7px);overflow:auto}
+.intro[hidden]{display:none}
+.intro .card{max-width:600px;width:100%;padding:22px 24px;background:rgba(10,15,32,.9)}
+.intro h2{margin:0 0 10px;font-family:var(--font-display);font-weight:600;font-size:clamp(18px,3.4vw,24px);line-height:1.15;text-wrap:balance}
+.intro p{margin:0 0 10px;text-wrap:pretty;font-size:15px}
+.intro dl{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:14px 0 0;font-size:13.5px}
+.intro dt{color:var(--accent);font-weight:600}
+.intro dd{margin:0;color:var(--ink)}
+.intro .btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+.intro .btns button{padding:10px 18px;min-height:42px}
+.gloss details{border-top:1px solid var(--line);padding:7px 0}
+.gloss summary{cursor:pointer;font-weight:600;font-size:13px}
+.gloss p{margin:5px 0 0;color:var(--muted);font-size:12.5px}
+#tip{position:fixed;z-index:9;pointer-events:none;padding:4px 9px;border-radius:8px;font-size:12px;background:rgba(8,12,26,.92);border:1px solid var(--line);transform:translate(12px,14px)}
+.nogl{position:fixed;inset:0;display:grid;place-items:center;color:var(--muted);text-align:center;padding:24px}
+
+@media (max-width:1000px){
+  .dock{width:auto;right:max(16px,env(safe-area-inset-right,0px))}
+  #panelBtn{display:inline-block}
+  .panel{display:none;transform:none;top:calc(max(12px,env(safe-area-inset-top,0px)) + 110px);left:max(12px,env(safe-area-inset-left,0px));right:max(12px,env(safe-area-inset-right,0px));width:auto;bottom:max(12px,env(safe-area-inset-bottom,0px));z-index:8;background:rgba(8,12,26,.88)}
+  .panel.open{display:block}
+  .panel:hover{transform:none}
+  .panel .close{display:inline-block}
+}
+@media (max-width:700px){
+  .brand p{display:none}
+  nav#scenarios{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;scrollbar-width:none;width:100%}
+  nav#scenarios button{flex:0 0 auto}
+}
+@media (prefers-reduced-motion: reduce){ .panel{transition:none} }
+/* ---- tabbed side panel ---- */
+:root{--pw:352px}
+.dock{width:min(780px,calc(100% - 32px - var(--pw)))}
+.panel{transition:transform .3s,width .25s}
+.panel[data-tab="control"]{width:336px}
+.panel[data-tab="code"]{width:min(540px,44vw)}
+.panel[data-tab="order"]{width:min(480px,40vw)}
+.panel[data-tab="bench"]{width:min(520px,42vw)}
+.panel[data-tab="play"]{width:min(420px,36vw)}
+.panel[data-tab="interview"]{width:min(520px,42vw)}
+.panel[data-tab="quiz"]{width:min(460px,38vw)}
+.tabs{display:flex;gap:4px;overflow-x:auto;margin:-4px -4px 12px;padding:4px;position:sticky;top:-14px;z-index:2;background:linear-gradient(var(--bgs,rgba(10,15,32,.92)),var(--bgs,rgba(10,15,32,.92)));scrollbar-width:none;border-radius:10px}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:0 0 auto;padding:4px 11px;min-height:30px;font-size:12px;border-radius:8px;border-color:transparent;background:transparent;color:var(--muted)}
+.tabs button[aria-selected="true"]{color:var(--ink);background:var(--glass2);border-color:var(--line);box-shadow:0 0 0 1px rgba(143,168,255,.4)}
+.tabs .close{display:none;margin-left:auto}
+.tabpane[hidden]{display:none}
+.tabpane h3{margin:0 0 6px;font-size:15px;font-weight:600}
+.tabpane .lead{margin:0 0 10px;color:var(--muted);font-size:13px;text-wrap:pretty}
+.tabpane .note{margin:10px 0 0;color:var(--muted);font-size:12px;text-wrap:pretty}
+#tl{width:100%;height:112px;display:block;border-radius:8px;background:rgba(255,255,255,.03);border:1px solid var(--line)}
+.tlcap{display:flex;justify-content:space-between;font-size:10px;color:var(--muted);margin-top:3px;font-family:var(--font-mono)}
+.linkhint{margin:14px 0 0;font-size:12px;color:var(--muted)}
+
+/* code tab */
+.codebar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin-bottom:8px;font-size:12px;color:var(--muted)}
+.codebar a{color:var(--accent)}
+.codebar label{display:flex;gap:6px;align-items:center}
+.codebar input{accent-color:var(--accent)}
+.fnchips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.fnchips button{font-family:var(--font-mono);font-size:11px;padding:2px 9px;min-height:26px;border-radius:7px}
+.fnchips button[aria-pressed="true"]{border-color:var(--accent);color:var(--ink);background:rgba(143,168,255,.14)}
+.happened{padding:9px 11px;border-radius:10px;border:1px solid var(--line);background:rgba(255,255,255,.04);font-size:13px;margin-bottom:8px;min-height:62px}
+.happened b{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px}
+pre.code{margin:0;padding:8px 0;border:1px solid var(--line);border-radius:10px;background:rgba(3,6,16,.6);font-family:var(--font-mono);font-size:11.5px;line-height:1.55;max-height:calc(100vh - 380px);min-height:220px;overflow:auto;tab-size:4}
+pre.code .ln{display:flex;gap:10px;padding:0 10px 0 0;white-space:pre;min-width:max-content}
+pre.code .n{flex:0 0 3.6ch;text-align:right;color:#4d5a78;user-select:none;padding-left:8px}
+pre.code .t{flex:1}
+pre.code .ln.hot{background:rgba(143,168,255,.2);box-shadow:inset 3px 0 var(--accent)}
+pre.code .ln.hot.fresh{animation:hotflash .9s ease-out}
+@keyframes hotflash{from{background:rgba(143,168,255,.7)}to{background:rgba(143,168,255,.2)}}
+pre.code .c{color:#6d7a99;font-style:italic}
+pre.code .k{color:#c792ea}
+pre.code .a{color:#7fdbca}
+pre.code .m{color:#ffd166}
+pre.code .mo{margin-left:12px;font-size:10px;padding:0 6px;border-radius:5px;border:1px solid var(--line);font-family:var(--font-ui);font-weight:600;align-self:center;line-height:16px}
+pre.code .mo.rel{color:var(--ok);border-color:var(--ok)}
+pre.code .mo.acq{color:var(--accent);border-color:var(--accent)}
+pre.code .mo.rlx{color:var(--muted)}
+
+/* ordering tab */
+.seg{display:flex;gap:0;margin:0 0 10px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.seg button{flex:1;border:0;border-radius:0;background:transparent;min-height:34px;font-size:12px}
+.seg button[aria-pressed="true"]{background:rgba(143,168,255,.18);color:var(--ink);font-weight:600}
+.seg button.bad[aria-pressed="true"]{background:rgba(255,77,106,.2)}
+.ord{display:grid;grid-template-columns:1fr;gap:8px}
+.ordcol{border:1px solid var(--line);border-radius:10px;padding:9px 10px;background:rgba(255,255,255,.03)}
+.ordcol h4{margin:0 0 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600}
+.oc{display:block;font-family:var(--font-mono);font-size:11px;padding:2px 6px;border-radius:5px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}
+.oc.on{background:rgba(143,168,255,.2);color:var(--ink)}
+.cells{display:flex;gap:6px;margin:4px 0 8px}
+.cell{flex:1;height:34px;border-radius:7px;border:1px dashed var(--line);display:grid;place-items:center;font-family:var(--font-mono);font-size:14px;color:var(--muted);transition:all .25s}
+.cell.full{border-style:solid;border-color:var(--c2);background:rgba(56,242,180,.15);color:var(--ink)}
+.cell.pending{border-color:var(--warn);color:var(--warn);background:rgba(255,209,102,.08)}
+.putbox{display:flex;align-items:center;gap:10px;font-family:var(--font-mono);font-size:13px}
+.putbox b{font-size:22px;transition:color .25s}
+.putbox .tag{font-size:10px;padding:1px 8px;border-radius:999px;border:1px solid var(--line);font-family:var(--font-ui);font-weight:600}
+.putbox .tag.rel{color:var(--ok);border-color:var(--ok)}
+.putbox .tag.rlx{color:var(--bad);border-color:var(--bad)}
+.verdict{margin-top:6px;padding:6px 9px;border-radius:8px;font-size:12.5px;display:none}
+.verdict.ok{display:block;background:rgba(56,242,180,.12);border:1px solid var(--ok);color:var(--ok)}
+.verdict.bad{display:block;background:rgba(255,77,106,.12);border:1px solid var(--bad);color:var(--bad)}
+.ordmsg{margin:10px 0 0;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.05);border:1px solid var(--line);font-size:13.5px;min-height:76px;text-wrap:pretty}
+.ordnav{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}
+.ordnav .sp{flex:1}
+.ordstep{font-family:var(--font-mono);font-size:11px;color:var(--muted)}
+
+/* benchmark tab */
+.bgroup{margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:rgba(255,255,255,.03)}
+.bgroup h4{margin:0 0 8px;font-size:13px;font-weight:600}
+.brow{display:grid;grid-template-columns:78px 1fr 84px;gap:8px;align-items:center;margin:4px 0;font-size:12px}
+.brow .bar{height:14px;border-radius:4px;background:rgba(255,255,255,.06);position:relative;overflow:hidden}
+.brow .bar i{display:block;height:100%;border-radius:4px}
+.brow .old i{background:#6d7a99}
+.brow .new i{background:var(--c2)}
+.brow span.v{font-family:var(--font-mono);text-align:right;font-variant-numeric:tabular-nums}
+.bnote{font-size:12px;color:var(--muted);margin-top:6px}
+.bnote b{color:var(--ink)}
+.findings{margin:0 0 12px;padding:0 0 0 18px;font-size:13px;display:flex;flex-direction:column;gap:5px}
+.bmeta{font-size:11.5px;color:var(--muted);line-height:1.5}
+.bmeta pre{font-family:var(--font-mono);font-size:10.5px;overflow:auto;max-height:260px;border:1px solid var(--line);border-radius:8px;padding:8px;background:rgba(3,6,16,.6);color:var(--ink)}
+details.sm summary{cursor:pointer;color:var(--accent);font-size:12px;font-weight:600;margin:8px 0}
+
+/* playground */
+.pgrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.pgrow label{display:flex;flex-direction:column;gap:2px;font-size:11px;color:var(--muted)}
+.pgrow select,.pgrow input{font:inherit;background:var(--glass2);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:5px 8px;min-height:32px;width:100%}
+.pgrow select option{background:#0d1428}
+.pgrow input[type=number]{width:70px}
+.pgchips{display:flex;flex-wrap:wrap;gap:5px;min-height:34px;padding:8px;border:1px dashed var(--line);border-radius:10px;margin-bottom:10px}
+.pgchips .chip{font-family:var(--font-mono);font-size:12px;padding:3px 4px 3px 9px;border-radius:7px;border:1px solid var(--line);background:rgba(255,255,255,.05);display:flex;gap:6px;align-items:center}
+.pgchips .chip button{padding:0 6px;min-height:20px;border-radius:5px;font-size:12px;line-height:18px;background:transparent}
+.pgchips .empty{color:var(--muted);font-size:12px;align-self:center}
+.pgmsg{font-size:12.5px;min-height:20px;margin-top:8px}
+.pgmsg.err{color:var(--bad)} .pgmsg.ok{color:var(--ok)}
+.presets{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.presets button{font-size:12px;padding:4px 10px;min-height:28px}
+
+/* interview + quiz */
+.pitch{padding:12px 14px;border:1px solid rgba(143,168,255,.4);border-radius:12px;background:rgba(143,168,255,.08);font-size:13.5px;text-wrap:pretty;margin-bottom:14px}
+.pitch b.k{display:block;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--accent);margin-bottom:4px}
+.qa details{border-top:1px solid var(--line);padding:8px 0}
+.qa summary{cursor:pointer;font-weight:600;font-size:13.5px}
+.qa p{margin:6px 0 0;font-size:13px;color:#cfd8ea;text-wrap:pretty}
+.qa p+p{margin-top:5px}
+.qa .tagrow{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
+.qa .tg{font-size:10px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+.qq{padding:12px 0;border-top:1px solid var(--line)}
+.qq:first-of-type{border-top:0}
+.qq h4{margin:0 0 8px;font-size:14px;font-weight:600;text-wrap:pretty}
+.qopts{display:flex;flex-direction:column;gap:6px}
+.qopts button{text-align:left;border-radius:10px;font-size:13px;padding:8px 12px;min-height:38px;white-space:normal}
+.qopts button.right{border-color:var(--ok);background:rgba(56,242,180,.12)}
+.qopts button.wrong{border-color:var(--bad);background:rgba(255,77,106,.12)}
+.qexp{margin:8px 0 0;font-size:12.5px;color:var(--muted);display:none;text-wrap:pretty}
+.qexp.show{display:block}
+.qscore{padding:12px 14px;border-radius:12px;border:1px solid var(--accent);background:rgba(143,168,255,.1);margin-top:12px;font-size:14px}
+
+/* presenter */
+.pbar{height:3px;border-radius:2px;background:var(--glass2);margin:-2px 0 8px;overflow:hidden;display:none}
+.pbar i{display:block;height:100%;width:0;background:var(--accent)}
+body.present .pbar{display:block}
+body.present .panel,body.present nav#scenarios,body.present .brand p{display:none!important}
+body.present .dock{width:min(860px,calc(100% - 32px))}
+.tc-lang{padding:2px 10px;min-height:28px;font-size:12px}
+.tc-nar{display:none;align-items:center;gap:6px;color:var(--muted);font-size:12px}
+body.present .tc-nar{display:flex}
+.tc-nar input{accent-color:var(--accent)}
+
+@media (max-width:1000px){
+  :root{--pw:0px}
+  .dock{width:auto}
+  .panel[data-tab]{width:auto}
+  .tabs .close{display:inline-block}
+  pre.code{max-height:calc(100vh - 360px)}
+}
+
+@media (min-width:1001px){ .top{right:calc(var(--pw) + 4px)} }
+
+</style>
+
+</head>
+<body>
+<canvas id="gl" role="img" aria-label="3D control room: four GPFIFO rings feeding one GPU engine. Controls are repeated in the side panel."></canvas>
+
+<div class="top">
+  <div class="brand">
+    <h1>GPU Channel Lab</h1>
+    <p>One engine, many clients. Drag to orbit, click the pads on each lane to send work. A live copy of the <a href="https://github.com/ribhu0908/gpu-channel-sim" target="_blank" rel="noopener" style="color:var(--accent)">gpu-channel-sim</a> C simulator.</p>
+  </div>
+  <nav id="scenarios" aria-label="Scenarios"></nav>
+</div>
+
+<aside class="panel glass" id="panel" data-tab="control" aria-label="Side panel">
+  <div class="tabs" role="tablist" id="tabs"><button class="close" id="panelClose" type="button">Close</button></div>
+
+  <div class="tabpane" data-pane="control">
+    <section>
+      <h2>Channels</h2>
+      <div id="chrows"></div>
+    </section>
+    <section>
+      <h2>Engine timeline</h2>
+      <canvas id="tl" width="600" height="224" aria-label="Timeline of which channel the engine served, with parked and faulted periods"></canvas>
+      <div class="tlcap"><span>3 s ago (simulated)</span><span>now</span></div>
+    </section>
+    <section>
+      <h2>Counters</h2>
+      <dl class="stats" id="stats"></dl>
+    </section>
+    <section>
+      <h2>Event log</h2>
+      <ol class="log" id="log"></ol>
+    </section>
+    <section class="gloss">
+      <h2>Plain-English glossary</h2>
+      <details><summary>Channel</summary><p>One app's private line to the GPU. Each channel has its own queue, so apps do not get in each other's way.</p></details>
+      <details><summary>GPFIFO (the ring of blocks)</summary><p>The queue behind a channel: 16 slots in a circle. The app fills slots, the engine empties them, and both keep going round the circle.</p></details>
+      <details><summary>GP_PUT and GP_GET</summary><p>Two bookmarks on the ring. PUT is where the app adds the next batch. GET is where the engine reads from next.</p></details>
+      <details><summary>Method / pushbuffer</summary><p>A method is one small command (fill memory, copy, signal). A pushbuffer is a list of them. One block on a lane is one pushbuffer.</p></details>
+      <details><summary>Semaphore</summary><p>A shared counter used as a signal. One job raises it when done (release). Another job waits until it reaches a value (acquire).</p></details>
+      <details><summary>Timeslice and round-robin</summary><p>The engine runs one batch, then moves to the next channel that has work. Taking turns like this keeps it fair.</p></details>
+      <details><summary>Park / context switch</summary><p>A channel that must wait for a signal is set aside with its place saved, so the engine can serve others. It resumes exactly where it stopped.</p></details>
+      <details><summary>Watchdog</summary><p>A timer that checks how long the engine has been stuck on one batch. Past the limit, it cuts that channel off.</p></details>
+      <details><summary>Fault and recovery</summary><p>A channel that hangs or sends a bad command is marked FAULT and its queue is dropped. Other channels are unaffected. Recovery clears it for reuse.</p></details>
+      <details><summary>Acquire timeout</summary><p>A limit on how long a channel may wait for a signal. It stops a channel waiting forever for a helper that already crashed.</p></details>
+      <details><summary>Back-pressure (EAGAIN)</summary><p>When the ring is full, the app is told "try again later". It slows down instead of piling up work without limit.</p></details>
+      <details><summary>Lock-free ring</summary><p>The app and the engine pass work through the ring without ever making each other wait. The app writes first, then moves PUT. The engine reads PUT first, then the data.</p></details>
+    </section>
+    <p class="linkhint">The address bar follows what you are looking at (scenario, tour step, tab). Copy it to share this exact view.</p>
+  </div>
+
+  <div class="tabpane" data-pane="code" hidden>
+    <h3>The real C code, live</h3>
+    <p class="lead">Whatever happens in the scene lights up the C function that does it in <code>src/gpu_sim.c</code>. Line numbers are the real ones.</p>
+    <div class="codebar">
+      <label><input type="checkbox" id="codeFollow" checked> Follow live events</label>
+      <a id="codeLink" href="https://github.com/ribhu0908/gpu-channel-sim/blob/claude/exciting-archimedes-k5v3m5/src/gpu_sim.c" target="_blank" rel="noopener">Open full file on GitHub</a>
+    </div>
+    <div class="happened" id="codeWhat" aria-live="polite"><b>Just happened</b><span>Press Play. Each event in the scene will show up here with the code behind it.</span></div>
+    <div class="fnchips" id="fnChips"></div>
+    <pre class="code" id="codeView" tabindex="0" aria-label="C source"></pre>
+  </div>
+
+  <div class="tabpane" data-pane="order" hidden>
+    <h3>Why release and acquire matter</h3>
+    <p class="lead">The host writes a batch and then moves GP_PUT. The engine reads GP_PUT and then the batch. Step through it, then switch to the unsafe version.</p>
+    <div class="seg" id="ordMode">
+      <button type="button" data-m="safe" aria-pressed="true">Safe: release / acquire</button>
+      <button type="button" data-m="bad" class="bad" aria-pressed="false">Unsafe: no ordering</button>
+    </div>
+    <div class="ord">
+      <div class="ordcol"><h4>Host thread</h4>
+        <span class="oc" id="oc-h1"></span><span class="oc" id="oc-h2"></span></div>
+      <div class="ordcol"><h4>Shared memory: slot 3 and GP_PUT</h4>
+        <div class="cells" id="ordCells"></div>
+        <div class="putbox">GP_PUT = <b id="ordPut">3</b><span class="tag" id="ordTag"></span></div></div>
+      <div class="ordcol"><h4>Engine thread</h4>
+        <span class="oc" id="oc-e1"></span><span class="oc" id="oc-e2"></span>
+        <div class="cells" id="ordRead" style="margin-top:8px"></div>
+        <div class="verdict" id="ordVerdict"></div></div>
+    </div>
+    <div class="ordmsg" id="ordMsg" aria-live="polite"></div>
+    <div class="ordnav">
+      <button id="ordBack" type="button">Back</button>
+      <button class="primary" id="ordNext" type="button">Next step</button>
+      <button id="ordAuto" type="button">Auto-play</button>
+      <span class="sp"></span><span class="ordstep" id="ordStep"></span>
+    </div>
+    <p class="note">This illustrates what the ordering protects against. Weakly ordered CPUs (such as ARM) and compilers are allowed to reorder plain stores. The simulator's C code uses release stores and acquire loads, and ThreadSanitizer reports no race in it.</p>
+  </div>
+
+  <div class="tabpane" data-pane="bench" hidden>
+    <h3>Mutex ring vs lock-free ring</h3>
+    <p class="lead">Measured on the real C code: the earlier version (device mutex around every submit) against the current one (atomic GP_PUT / GP_GET). Nothing here is estimated.</p>
+    <div id="benchBody"></div>
+  </div>
+
+  <div class="tabpane" data-pane="play" hidden>
+    <h3>Playground</h3>
+    <p class="lead">Build your own pushbuffer, send it to a channel and watch what the engine does. Semaphores start at 0.</p>
+    <div class="presets" id="pgPresets"></div>
+    <div class="pgrow">
+      <label style="flex:1 1 120px">Channel<select id="pgCh"></select></label>
+      <label style="flex:1 1 140px">Method<select id="pgOp">
+        <option value="fill">FILL (write memory)</option><option value="copy">COPY (memory to memory)</option>
+        <option value="rel">SEM_RELEASE (ring a bell)</option><option value="acq">SEM_ACQUIRE (wait for a bell)</option>
+        <option value="nop">NOP</option><option value="hang">HANG (get stuck)</option><option value="bad">BAD (invalid opcode)</option></select></label>
+    </div>
+    <div class="pgrow" id="pgArgs"></div>
+    <div class="pgrow"><button id="pgAdd" type="button">Add method</button><button id="pgClear" type="button">Clear</button></div>
+    <div class="pgchips" id="pgChips"></div>
+    <div class="pgrow"><button class="primary" id="pgSubmit" type="button">Submit and run</button></div>
+    <div class="pgmsg" id="pgMsg" aria-live="polite"></div>
+    <p class="note">One submit is one block on the lane. A channel runs its methods in order, so put SEM_ACQUIRE before the work that depends on it.</p>
+  </div>
+
+  <div class="tabpane" data-pane="interview" hidden>
+    <h3>Interview mode</h3>
+    <div class="pitch"><b class="k">60-second pitch</b><span id="pitchText"></span></div>
+    <h3 style="margin-top:6px">Questions you may be asked</h3>
+    <p class="lead">Answers refer to this exact code. Tap a question to open it.</p>
+    <div class="qa" id="qaList"></div>
+  </div>
+
+  <div class="tabpane" data-pane="quiz" hidden>
+    <h3>Check your understanding</h3>
+    <p class="lead">Five questions. Tap an answer to see why.</p>
+    <div id="quizBody"></div>
+  </div>
+</aside>
+
+<div class="dock" id="dock">
+  <div class="tourcard glass" id="tour" hidden aria-live="polite">
+    <div class="pbar"><i id="pbarFill"></i></div>
+    <div class="tc-head"><span class="tc-step" id="tcStep"></span><div class="tc-dots" id="tcDots"></div><button class="tc-lang" id="tcLang" type="button">Hinglish</button><button id="tcExit" type="button">Exit tour</button></div>
+    <h2 id="tcTitle"></h2>
+    <p id="tcBody"></p>
+    <ul class="tc-sum" id="tcSum" hidden></ul>
+    <details class="tc-tech" id="tcTechBox"><summary id="tcTechSum">Under the hood</summary><p id="tcTech"></p></details>
+    <div class="tc-nav">
+      <button id="tcBack" type="button">Back</button>
+      <button id="tcReplay" type="button">Replay</button>
+      <button id="tcPlay" type="button">Pause</button>
+      <label class="tc-nar"><input type="checkbox" id="tcNar"> <span id="tcNarLbl">Narrate</span></label>
+      <span class="sp"></span>
+      <button class="primary" id="tcNext" type="button">Next</button>
+    </div>
+  </div>
+  <details class="caption glass" id="captionBox" open>
+    <summary>What to watch</summary>
+    <p id="caption"></p>
+  </details>
+  <div class="transport glass">
+    <button class="primary" id="play" type="button"></button>
+    <button id="step" type="button">Step</button>
+    <button id="reset" type="button">Restart</button>
+    <label>Speed
+      <select id="speed"><option value="0.5">0.5x</option><option value="1" selected>1x</option><option value="2">2x</option><option value="4">4x</option></select>
+    </label>
+    <label><input type="checkbox" id="acq"> Acquire timeout</label>
+    <span class="sp"></span>
+    <button id="panelBtn" type="button">Panel</button>
+    <span class="clock" id="clock">t = 0 ms</span>
+  </div>
+</div>
+<div id="tip" hidden></div>
+
+<div class="intro" id="intro" role="dialog" aria-modal="true" aria-labelledby="introT" hidden>
+  <div class="card glass">
+    <h2 id="introT"></h2>
+    <p id="introP1"></p>
+    <p id="introP2"></p>
+    <dl id="introDl"></dl>
+    <div class="btns">
+      <button class="primary" id="introTour" type="button"></button>
+      <button id="introSkip" type="button"></button>
+      <button id="introLang" type="button"></button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script>
+(() => {
+  const NCH = 4, RING = 16, NSEM = 8, NV = 8, WD = 400, ACQ_MS = 400, SIM_PER_REAL = 0.3;
+  const NAMES = ['compute', 'buggy', 'upload', 'render'];
+  const COST = { NOP: 10, FILL: 60, COPY: 60, REL: 20, ACQ: 20, HANG: Infinity, BAD: 10 };
+  const M = {
+    nop: () => ({ op: 'NOP' }), fill: d => ({ op: 'FILL', d }), copy: (d, s) => ({ op: 'COPY', d, s }),
+    rel: (s, v) => ({ op: 'REL', s, v }), acq: (s, v) => ({ op: 'ACQ', s, v }),
+    hang: () => ({ op: 'HANG' }), bad: () => ({ op: 'BAD' })
+  };
+  const lbl = m => ({
+    NOP: 'NOP', FILL: 'FILL V' + m.d, COPY: 'COPY V' + m.s + '→V' + m.d,
+    REL: 'REL S' + m.s + '=' + m.v, ACQ: 'ACQ S' + m.s + '≥' + m.v, HANG: 'HANG', BAD: 'BAD 0x77'
+  })[m.op];
+  const reached = (cur, want) => ((cur - want) | 0) >= 0;
+
+  /* ------------------------------------------------------------ simulation */
+  let S, curScenario = 1, acqOn = false;
+  function newState() {
+    return {
+      now: 0, sem: Array(NSEM).fill(0), vram: Array(NV).fill(-1),
+      rr: 0, active: -1, activeSince: 0, remaining: 0,
+      stats: { entries: 0, methods: 0, ctx: 0, faults: 0, wd: 0, acq: 0 },
+      ch: NAMES.map(() => ({ ring: Array(RING).fill(null), put: 0, get: 0, cursor: 0,
+        parked: false, parkedSince: 0, parkSem: 0, parkVal: 0, status: 'OK' })),
+      log: [], script: [], events: [], ticks: []
+    };
+  }
+  function log(kind, msg) { S.log.push({ t: S.now, kind, msg }); }
+  function ev(o) { if (S.events.length < 300) S.events.push(o); }
+  function pushTick() {
+    let pm = 0, fm = 0;
+    S.ch.forEach((c, i) => { if (c.status !== 'OK') fm |= 1 << i; else if (c.parked) pm |= 1 << i; });
+    S.ticks.push((S.active + 1) | (pm << 3) | (fm << 7));
+    if (S.ticks.length > 300) S.ticks.shift();
+  }
+  function at(t, fn) { S.script.push({ t, fn }); S.script.sort((a, b) => a.t - b.t); }
+  function runScript() { while (S.script.length && S.script[0].t <= S.now) S.script.shift().fn(); }
+
+  function submit(ci, methods) {
+    const c = S.ch[ci], n = NAMES[ci];
+    if (c.status !== 'OK') { ev({ t: 'eio', i: ci }); log('err', n + ' submit refused: -EIO (channel is faulted)'); return -5; }
+    if (c.put - c.get >= RING) { ev({ t: 'eagain', i: ci }); log('warn', n + ' submit refused: -EAGAIN (GPFIFO full, ' + RING + '/' + RING + ')'); return -11; }
+    c.ring[c.put % RING] = methods;
+    c.put++;
+    ev({ t: 'submit', i: ci, slot: (c.put - 1) % RING });
+    log('', n + ' submitted ' + methods.map(lbl).join(', ') + '  (GP_PUT=' + c.put + ')');
+    return 0;
+  }
+  function recover(ci) {
+    const c = S.ch[ci];
+    if (c.status === 'OK' || S.active === ci) return;
+    c.get = c.put; c.ring.fill(null); c.cursor = 0; c.parked = false; c.status = 'OK';
+    ev({ t: 'recover', i: ci });
+    log('ok', NAMES[ci] + ' recovered: fault cleared, ring emptied');
+  }
+  function fault(ci, why) {
+    const c = S.ch[ci], dropped = c.put - c.get;
+    c.status = why; c.get = c.put; c.cursor = 0; c.parked = false;
+    S.stats.faults++;
+    ev({ t: 'fault', i: ci, why });
+    log('err', NAMES[ci] + ' FAULT_' + why + (dropped ? ' (' + dropped + ' pending entr' + (dropped === 1 ? 'y' : 'ies') + ' dropped)' : ''));
+  }
+  function pick() {
+    for (let k = 0; k < NCH; k++) {
+      const i = (S.rr + k) % NCH, c = S.ch[i];
+      if (c.status !== 'OK' || c.get === c.put) continue;
+      if (c.parked && !reached(S.sem[c.parkSem], c.parkVal)) continue;
+      if (c.parked) { ev({ t: 'resume', i }); log('ok', NAMES[i] + ' resumes at its saved position (S' + c.parkSem + ' reached)'); }
+      c.parked = false;
+      return i;
+    }
+    return -1;
+  }
+  function release(i) { S.active = -1; S.rr = (i + 1) % NCH; }
+  function begin(i) {
+    const c = S.ch[i], e = c.ring[c.get % RING];
+    if (c.cursor >= e.length) {
+      c.cursor = 0; c.get++; S.stats.entries++;
+      ev({ t: 'retire', i, slot: (c.get - 1) % RING });
+      log('', NAMES[i] + ' entry retired  (GP_GET=' + c.get + ')');
+      release(i); return;
+    }
+    const m = e[c.cursor];
+    if (m.op === 'ACQ' && !reached(S.sem[m.s], m.v)) {
+      c.parked = true; c.parkedSince = S.now; c.parkSem = m.s; c.parkVal = m.v; S.stats.ctx++;
+      ev({ t: 'park', i });
+      log('warn', NAMES[i] + ' parked: S' + m.s + ' is ' + S.sem[m.s] + ', needs ≥' + m.v + ' (context switch)');
+      release(i); return;
+    }
+    S.remaining = COST[m.op];
+    if (m.op === 'HANG') ev({ t: 'hang', i });
+  }
+  function finishMethod(i) {
+    const c = S.ch[i], m = c.ring[c.get % RING][c.cursor];
+    if (m.op === 'FILL') S.vram[m.d] = i;
+    else if (m.op === 'COPY') S.vram[m.d] = S.vram[m.s];
+    else if (m.op === 'REL') { S.sem[m.s] = m.v; ev({ t: 'rel', i, s: m.s }); log('', NAMES[i] + ' released S' + m.s + '=' + m.v); }
+    else if (m.op === 'BAD') { fault(i, 'INVALID_METHOD'); release(i); return; }
+    c.cursor++; S.stats.methods++;
+    begin(i);
+  }
+  function stepSim(dt) {
+    S.now += dt;
+    runScript();
+    if (S.active >= 0 && S.now - S.activeSince >= WD) {
+      const i = S.active;
+      S.stats.wd++; ev({ t: 'wd', i });
+      log('err', 'watchdog: ' + NAMES[i] + ' held the engine for ' + WD + ' ms');
+      fault(i, 'TIMEOUT');
+      release(i);
+    }
+    if (acqOn) {
+      for (let i = 0; i < NCH; i++) {
+        const c = S.ch[i];
+        if (i === S.active || c.status !== 'OK' || !c.parked) continue;
+        if (reached(S.sem[c.parkSem], c.parkVal)) continue;
+        if (S.now - c.parkedSince >= ACQ_MS) { S.stats.acq++; ev({ t: 'acqto', i }); fault(i, 'ACQUIRE_TIMEOUT'); }
+      }
+    }
+    let budget = dt;
+    for (let guard = 0; guard < 60; guard++) {
+      if (S.active < 0) {
+        const i = pick();
+        if (i < 0) break;
+        ev({ t: 'pick', i });
+        S.active = i; S.activeSince = S.now;
+        begin(i);
+        continue;
+      }
+      if (S.remaining === Infinity) break;
+      if (S.remaining > budget) { S.remaining -= budget; break; }
+      budget -= S.remaining; S.remaining = 0;
+      finishMethod(S.active);
+    }
+    pushTick();
+  }
+
+  /* ------------------------------------------------------------- scenarios */
+  const SC = {
+    1: { name: 'Hang and recover', sub: 'the full story',
+      text: 'compute needs S0, so the engine parks it and moves on. buggy then hangs the engine: watch the ring around the engine fill. At 400 ms the watchdog cuts buggy off and drops its queue. upload runs, releases S0, and compute resumes exactly where it stopped. Then click the green pad on the red lane (or Recover in the panel) and send buggy a new job.',
+      setup() {
+        submit(0, [M.acq(0, 1), M.copy(4, 1), M.rel(1, 1)]);
+        submit(1, [M.hang(), M.rel(7, 1)]);
+        submit(2, [M.fill(1), M.rel(0, 1)]);
+      } },
+    2: { name: 'Dependency', sub: 'consumer submitted first',
+      text: 'render is submitted before the work it depends on. It parks on S2 instead of blocking everyone, so the engine stays free. Half a second later upload produces the data and releases S2, and render picks up at the exact method it paused on.',
+      setup() {
+        submit(3, [M.acq(2, 1), M.copy(4, 0), M.rel(3, 1)]);
+        at(600, () => submit(2, [M.fill(0), M.rel(2, 1)]));
+      } },
+    3: { name: 'Bad command', sub: 'fault isolation',
+      text: 'buggy sends an opcode the engine does not know. Only buggy faults. compute, upload and render carry on and finish. Use the pads to send more work or break another channel.',
+      setup() {
+        submit(0, [M.fill(0), M.rel(0, 1)]);
+        submit(1, [M.bad(), M.rel(7, 1)]);
+        submit(2, [M.copy(2, 0), M.rel(1, 1)]);
+        submit(3, [M.fill(3), M.fill(4), M.rel(2, 1)]);
+      } },
+    4: { name: 'Dead producer', sub: 'acquire timeout',
+      text: 'compute waits for S4, but the channel that should release it (buggy) faults first. With the acquire timeout on, compute is faulted after 400 ms instead of waiting forever. Untick the box, restart, and compute stays parked for good.',
+      setup() {
+        submit(0, [M.acq(4, 1), M.rel(5, 1)]);
+        submit(1, [M.bad(), M.rel(4, 1)]);
+        at(200, () => submit(2, [M.fill(6), M.rel(6, 1)]));
+      } },
+    5: { name: 'Ring full', sub: 'back-pressure',
+      text: 'compute is stalled on S6 while the host keeps submitting. When all 16 slots are used, further submits fail with EAGAIN. After about two seconds upload releases S6 and the ring drains one entry per timeslice.',
+      setup() {
+        submit(0, [M.acq(6, 1), M.fill(1)]);
+        for (let k = 1; k <= 17; k++) at(k * 60, () => submit(0, [M.fill(k % NV)]));
+        at(2200, () => submit(2, [M.rel(6, 1)]));
+      } }
+  };
+
+  /* scenarios used only by the guided tour */
+  const TS = {
+    intro: { text: '', setup() {
+      submit(0, [M.fill(0), M.rel(0, 1)]); submit(1, [M.fill(2)]); submit(2, [M.fill(4), M.nop()]); submit(3, [M.fill(6)]);
+    } },
+    ring: { text: '', setup() {
+      for (let k = 0; k < 6; k++) submit(0, [M.fill(k % NV), M.nop()]);
+      submit(2, [M.fill(3)]);
+    } },
+    rr: { text: '', setup() {
+      for (let k = 0; k < 4; k++) for (let i = 0; i < NCH; i++) submit(i, [M.fill((i * 2 + k) % NV), M.nop()]);
+    } }
+  };
+
+  /* ------------------------------------------------------------ HUD (DOM) */
+  const $ = id => document.getElementById(id);
+  const elScen = $('scenarios'), elLog = $('log'), playBtn = $('play'), speedSel = $('speed'), acqChk = $('acq');
+  const panel = $('panel');
+  let playing = false, speed = 1, logShown = 0;
+  const ICON_PLAY = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 1.5v13l11-6.5z"/></svg>Play';
+  const ICON_PAUSE = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 2h4v12H3zM9 2h4v12H9z"/></svg>Pause';
+
+  if (window.matchMedia('(max-width:700px)').matches) $('captionBox').removeAttribute('open');
+
+  Object.keys(SC).forEach(id => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.id = id;
+    b.innerHTML = '<b>' + id + '. ' + SC[id].name + '</b><span>' + SC[id].sub + '</span>';
+    b.addEventListener('click', () => { if (typeof exitTour === 'function') exitTour(true); load(+id); });
+    elScen.appendChild(b);
+  });
+
+  function act(i, kind) {
+    if (kind === 'job') submit(i, [M.fill(Math.floor(Math.random() * NV)), M.nop()]);
+    else if (kind === 'hang') submit(i, [M.hang()]);
+    else if (kind === 'bad') submit(i, [M.bad()]);
+    else if (kind === 'rec') recover(i);
+  }
+
+  const rowEls = NAMES.map((n, i) => {
+    const r = document.createElement('div'); r.className = 'chrow'; r.style.setProperty('--cc', 'var(--c' + i + ')');
+    r.innerHTML = '<span class="nm"><span class="dot"></span>' + n + '</span><span class="pill">IDLE</span>' +
+      '<div class="acts"><button type="button" data-a="job">+ job</button><button type="button" data-a="hang">+ hang</button>' +
+      '<button type="button" data-a="bad">+ bad method</button><button type="button" class="primary" data-a="rec" hidden>Recover</button></div>';
+    $('chrows').appendChild(r);
+    r.addEventListener('click', e => { const b = e.target.closest('button'); if (b) act(i, b.dataset.a); });
+    return { pill: r.querySelector('.pill'), rec: r.querySelector('[data-a="rec"]') };
+  });
+  const STAT_DEFS = [['entries', 'entries done'], ['methods', 'methods run'], ['ctx', 'context switches'],
+    ['faults', 'faults'], ['wd', 'watchdog resets'], ['acq', 'acquire timeouts']];
+  const statEls = {};
+  STAT_DEFS.forEach(([k, l]) => {
+    const d = document.createElement('div'); d.innerHTML = '<dt>' + l + '</dt><dd>0</dd>';
+    $('stats').appendChild(d); statEls[k] = d.querySelector('dd');
+  });
+  const setText = (el, t) => { if (el.textContent !== t) el.textContent = t; };
+
+  function renderHud() {
+    setText($('clock'), 't = ' + Math.round(S.now) + ' ms');
+    S.ch.forEach((c, i) => {
+      const el = rowEls[i], depth = c.put - c.get, faulted = c.status !== 'OK';
+      let pill = 'IDLE', cls = 'pill';
+      if (faulted) { pill = 'FAULT'; cls += ' fault'; }
+      else if (S.active === i) { pill = 'RUNNING'; cls += ' run'; }
+      else if (c.parked) { pill = 'PARKED'; cls += ' parked'; }
+      else if (depth > 0) { pill = depth + ' QUEUED'; cls += ' queued'; }
+      setText(el.pill, pill); if (el.pill.className !== cls) el.pill.className = cls;
+      el.rec.hidden = !faulted;
+    });
+    STAT_DEFS.forEach(([k]) => setText(statEls[k], String(S.stats[k])));
+    if (logShown > S.log.length) { elLog.innerHTML = ''; logShown = 0; }
+    if (logShown < S.log.length) {
+      for (; logShown < S.log.length; logShown++) {
+        const L = S.log[logShown], li = document.createElement('li');
+        const t = document.createElement('time'); t.textContent = Math.round(L.t);
+        const sp = document.createElement('span'); sp.textContent = L.msg; if (L.kind) sp.className = L.kind;
+        li.append(t, sp); elLog.appendChild(li);
+      }
+      elLog.scrollTop = elLog.scrollHeight;
+    }
+  }
+
+  /* ------------------------------------------------------------- 3D world */
+  function initStage() {
+    const canvas = $('gl');
+    const fail = msg => { const d = document.createElement('div'); d.className = 'nogl'; d.textContent = msg; document.body.appendChild(d); return null; };
+    if (!window.THREE) return fail('The 3D library could not load. The controls and log still work.');
+    let renderer;
+    try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true }); }
+    catch (e) { return fail('WebGL is not available here. The controls and log still work.'); }
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const V = (x, y, z) => new THREE.Vector3(x, y, z);
+    const PR = Math.min(1.5, window.devicePixelRatio || 1);
+    renderer.setPixelRatio(PR);
+    renderer.setClearColor(0x060912, 1);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x060912);
+    scene.fog = new THREE.Fog(0x060912, 34, 78);
+    const world = new THREE.Group(); scene.add(world);
+    const camera = new THREE.PerspectiveCamera(38, 2, 0.1, 220);
+
+    const CH = [0x3DA5FF, 0xFFA23A, 0x38F2B4, 0xB77CFF].map(h => new THREE.Color(h));
+    const ACC = new THREE.Color(0x8FA8FF), BAD = new THREE.Color(0xFF4D6A), WARN = new THREE.Color(0xFFD166), OK = new THREE.Color(0x38F2B4);
+    const DARK = new THREE.Color(0x0d1433), DIM = new THREE.Color(0x2a3668), INK = new THREE.Color(0xE8EEF8);
+    const LANE_Z = i => (i - 1.5) * 1.55, SLOT_X = s => s - 7.5, ENG_X = 11.5, BUS_END = ENG_X - 1.5;
+    const PIL_X = k => (k - 3.5) * 1.7 + 0.5;
+    const CX = -0.3;
+
+    /* ---- sprites with text */
+    const labels = [];
+    function label(text, size, tone, parent) {
+      const cv = document.createElement('canvas'); cv.width = 512; cv.height = 128;
+      const tex = new THREE.CanvasTexture(cv);
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+      sp.scale.set(size * 4, size, 1); sp.renderOrder = 10;
+      const l = { sp, cv, tex, text, tone }; labels.push(l); paintLabel(l); (parent || world).add(sp);
+      return l;
+    }
+    function paintLabel(l) {
+      const ctx = l.cv.getContext('2d'); ctx.clearRect(0, 0, 512, 128);
+      ctx.fillStyle = l.tone === 'muted' ? '#8D9AB5' : '#DCE5F5';
+      ctx.font = '600 54px "JetBrains Mono", ui-monospace, Menlo, monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(l.text, 256, 66); l.tex.needsUpdate = true;
+    }
+    const setLabel = (l, t) => { if (l.text !== t) { l.text = t; paintLabel(l); } };
+
+    /* ---- environment */
+    scene.add(new THREE.HemisphereLight(0x9bb4ff, 0x10152e, 0.55));
+    const key = new THREE.DirectionalLight(0xbfd0ff, 0.5); key.position.set(-6, 14, 9); scene.add(key);
+    const engLight = new THREE.PointLight(0x8fa8ff, 1.4, 20, 1.6); engLight.position.set(ENG_X, 3, 0); world.add(engLight);
+
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), new THREE.MeshLambertMaterial({ color: 0x070b17 }));
+    floor.rotation.x = -Math.PI / 2; floor.position.y = -0.3; world.add(floor);
+    const grid = new THREE.GridHelper(90, 90, 0x2b3d82, 0x131c40); grid.position.y = -0.28; grid.material.transparent = true; grid.material.opacity = 0.7; world.add(grid);
+    (function pool() {
+      const cv = document.createElement('canvas'); cv.width = cv.height = 256;
+      const g = cv.getContext('2d'), gr = g.createRadialGradient(128, 128, 4, 128, 128, 128);
+      gr.addColorStop(0, 'rgba(110,140,255,.55)'); gr.addColorStop(0.5, 'rgba(70,90,210,.18)'); gr.addColorStop(1, 'rgba(40,60,160,0)');
+      g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(50, 28), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+      m.rotation.x = -Math.PI / 2; m.position.set(CX, -0.26, 0); world.add(m);
+    })();
+    /* floating dust */
+    const dustN = 520, dpos = new Float32Array(dustN * 3);
+    for (let k = 0; k < dustN; k++) { dpos[k * 3] = (Math.random() - 0.5) * 60; dpos[k * 3 + 1] = Math.random() * 12; dpos[k * 3 + 2] = (Math.random() - 0.5) * 44; }
+    const dustGeo = new THREE.BufferGeometry(); dustGeo.setAttribute('position', new THREE.BufferAttribute(dpos, 3));
+    const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({ color: 0x8fa8ff, size: 0.09, transparent: true, opacity: 0.6, depthWrite: false }));
+    world.add(dust);
+
+    /* ---- shared geometry */
+    const gSlot = new THREE.BoxGeometry(0.84, 0.5, 0.84), gSlotE = new THREE.EdgesGeometry(gSlot);
+    const gPlate = new THREE.BoxGeometry(16.6, 0.12, 1.2), gPlateE = new THREE.EdgesGeometry(gPlate);
+    const gUnit = new THREE.BoxGeometry(1, 1, 1), gCone = new THREE.ConeGeometry(0.22, 0.46, 12), gBall = new THREE.SphereGeometry(0.2, 16, 12);
+    const gPad = new THREE.BoxGeometry(0.72, 0.2, 0.72), gPadE = new THREE.EdgesGeometry(gPad);
+    const lam = c => new THREE.MeshLambertMaterial({ color: c });
+    const edge = (geo, col, op) => new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op }));
+
+    /* ---- lanes */
+    const PADS = [];
+    const PAD_DEF = [['job', -11.2, 'job'], ['hang', -10.25, 'hang'], ['bad', -9.3, 'bad'], ['rec', -8.45, 'fix']];
+    const lanes = NAMES.map((n, i) => {
+      const z = LANE_Z(i), col = CH[i];
+      const plate = new THREE.Mesh(gPlate, new THREE.MeshLambertMaterial({ color: DARK })); plate.position.set(0, -0.1, z); world.add(plate);
+      const plateE = edge(gPlateE, col, 0.55); plate.add(plateE);
+      const bus = new THREE.Mesh(gUnit, new THREE.MeshBasicMaterial({ color: DIM })); bus.scale.set(BUS_END - 8.3, 0.08, 0.16); bus.position.set((BUS_END + 8.3) / 2, -0.08, z); world.add(bus);
+      const beam = new THREE.Mesh(gUnit, new THREE.MeshBasicMaterial({ color: col })); beam.scale.set(1, 0.1, 0.12); beam.visible = false; world.add(beam);
+      const ball = new THREE.Mesh(gBall, new THREE.MeshBasicMaterial({ color: col })); ball.scale.setScalar(1.3); ball.visible = false; world.add(ball);
+      const slots = [];
+      for (let s = 0; s < RING; s++) {
+        const m = new THREE.Mesh(gSlot, new THREE.MeshLambertMaterial({ color: DARK, transparent: true }));
+        m.position.set(SLOT_X(s), 0.06, z); m.scale.y = 0.3; world.add(m);
+        const e = edge(gSlotE, col, 0.3); m.add(e);
+        slots.push({ m, e, h: 0.3 });
+      }
+      const getC = new THREE.Mesh(gCone, new THREE.MeshBasicMaterial({ color: INK })); getC.rotation.x = Math.PI; world.add(getC);
+      const putC = new THREE.Mesh(gCone, new THREE.MeshBasicMaterial({ color: ACC })); putC.rotation.x = Math.PI; world.add(putC);
+      const nm = label(n, 1.0, 'ink'); nm.sp.position.set(-13.6, 0.55, z);
+      const st = label('idle', 0.62, 'muted'); st.sp.position.set(-13.6, -0.5, z);
+      PAD_DEF.forEach(([a, x, txt]) => {
+        const pc = a === 'job' ? col : a === 'hang' ? BAD : a === 'bad' ? WARN : OK;
+        const mat = new THREE.MeshLambertMaterial({ color: DARK, emissive: pc.clone().multiplyScalar(0.25) });
+        const m = new THREE.Mesh(gPad, mat); m.position.set(x, 0.0, z); world.add(m);
+        const e = edge(gPadE, pc, 0.9); m.add(e);
+        const tl = label(txt, 0.5, 'ink'); tl.sp.position.set(x, 0.6, z);
+        const pad = { m, i, a, base: pc, tl, hover: 0 };
+        m.userData.pad = pad; PADS.push(pad);
+      });
+      return { plate, plateE, bus, beam, ball, slots, getC, putC, getX: SLOT_X(0), putX: SLOT_X(0), st };
+    });
+
+    /* ---- engine */
+    const eng = new THREE.Group(); eng.position.set(ENG_X, 0.9, 0); world.add(eng);
+    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(1.25, 1), new THREE.MeshLambertMaterial({ color: 0x1a2350 })); eng.add(core);
+    const wire = new THREE.Mesh(new THREE.IcosahedronGeometry(1.65, 1), new THREE.MeshBasicMaterial({ color: 0x8fa8ff, wireframe: true, transparent: true, opacity: 0.45 })); eng.add(wire);
+    const orbA = new THREE.Mesh(new THREE.TorusGeometry(2.05, 0.025, 8, 80), new THREE.MeshBasicMaterial({ color: 0x8fa8ff, transparent: true, opacity: 0.6 })); eng.add(orbA);
+    const orbB = new THREE.Mesh(new THREE.TorusGeometry(2.35, 0.02, 8, 80), new THREE.MeshBasicMaterial({ color: 0x8fa8ff, transparent: true, opacity: 0.35 })); eng.add(orbB);
+    const wdRing = new THREE.Mesh(new THREE.RingGeometry(2.6, 2.9, 64, 1, 0, 0.01), new THREE.MeshBasicMaterial({ color: 0x8fa8ff, side: THREE.DoubleSide }));
+    wdRing.rotation.x = -Math.PI / 2; wdRing.position.set(ENG_X, -0.08, 0); world.add(wdRing);
+    const wdBase = new THREE.Mesh(new THREE.RingGeometry(2.6, 2.9, 64), new THREE.MeshBasicMaterial({ color: 0x24305e, side: THREE.DoubleSide, transparent: true, opacity: 0.7 }));
+    wdBase.rotation.x = -Math.PI / 2; wdBase.position.set(ENG_X, -0.14, 0); world.add(wdBase);
+    const engLabel = label('ENGINE', 1.0, 'ink'); engLabel.sp.position.set(ENG_X, 3.3, 0);
+    const wdLabel = label('watchdog 400 ms', 0.55, 'muted'); wdLabel.sp.position.set(ENG_X, -0.45, 3.5);
+    let wdTheta = 0, flash = 0;
+
+    /* ---- semaphores and memory */
+    const pillars = [], tiles = [];
+    const gPillar = new THREE.CylinderGeometry(0.32, 0.32, 1, 20);
+    for (let k = 0; k < NSEM; k++) {
+      const m = new THREE.Mesh(gPillar, new THREE.MeshLambertMaterial({ color: DARK })); m.position.set(PIL_X(k), 0.2, -5.4); world.add(m);
+      const l = label('S' + k, 0.6, 'muted'); l.sp.position.set(PIL_X(k), -0.3, -4.5);
+      pillars.push({ m, v: 0, h: 0.2, flash: 0 });
+    }
+    label('SEMAPHORES', 0.6, 'muted').sp.position.set(-8.9, 0.6, -5.4);
+    for (let k = 0; k < NV; k++) {
+      const m = new THREE.Mesh(gUnit, new THREE.MeshLambertMaterial({ color: DARK })); m.scale.set(1.2, 0.16, 1.2); m.position.set(PIL_X(k), 0, 5.3); world.add(m);
+      m.add(edge(new THREE.EdgesGeometry(gUnit), DIM, 0.9));
+      const l = label('V' + k, 0.6, 'muted'); l.sp.position.set(PIL_X(k), -0.1, 6.5);
+      tiles.push({ m, w: -2 });
+    }
+    label('MEMORY', 0.6, 'muted').sp.position.set(-8.9, 0.2, 5.3);
+
+    /* ---- monitor wall (event log) and engine hologram (counters) */
+    const mon = { cv: document.createElement('canvas'), n: -1, ref: null };
+    mon.cv.width = 1024; mon.cv.height = 400; mon.tex = new THREE.CanvasTexture(mon.cv);
+    const monitor = new THREE.Mesh(new THREE.PlaneGeometry(10, 3.9), new THREE.MeshBasicMaterial({ map: mon.tex, transparent: true }));
+    monitor.position.set(CX, 2.3, -8.9); monitor.rotation.x = -0.35; world.add(monitor);
+    function paintMonitor() {
+      const g = mon.cv.getContext('2d'); g.clearRect(0, 0, 1024, 400);
+      g.fillStyle = 'rgba(8,12,28,.82)'; g.fillRect(0, 0, 1024, 400);
+      g.strokeStyle = 'rgba(143,168,255,.5)'; g.lineWidth = 3; g.strokeRect(2, 2, 1020, 396);
+      g.fillStyle = '#8D9AB5'; g.font = '600 20px "JetBrains Mono", monospace'; g.textBaseline = 'middle';
+      g.fillText('EVENT LOG   t = ' + Math.round(S.now) + ' ms', 22, 28);
+      const lines = S.log.slice(-10);
+      g.font = '500 22px "JetBrains Mono", monospace';
+      lines.forEach((L, k) => {
+        const y = 66 + k * 32;
+        g.fillStyle = '#8D9AB5'; g.fillText(String(Math.round(L.t)).padStart(5, ' '), 22, y);
+        g.fillStyle = L.kind === 'err' ? '#FF4D6A' : L.kind === 'warn' ? '#FFD166' : L.kind === 'ok' ? '#38F2B4' : '#DCE5F5';
+        let t = L.msg; if (t.length > 62) t = t.slice(0, 61) + '…'; g.fillText(t, 108, y);
+      });
+      mon.tex.needsUpdate = true;
+    }
+    const holo = label('', 1, 'ink'); holo.cv.width = 512; holo.cv.height = 256; holo.sp.scale.set(6.4, 3.2, 1); holo.sp.position.set(ENG_X, 5.4, 0); holo.sig = '';
+    function paintHolo() {
+      const g = holo.cv.getContext('2d'); g.clearRect(0, 0, 512, 256);
+      const st = S.stats, rows = [['entries', st.entries], ['methods', st.methods], ['ctx switches', st.ctx], ['faults', st.faults], ['watchdog', st.wd], ['acq timeouts', st.acq]];
+      g.font = '500 26px "JetBrains Mono", monospace'; g.textBaseline = 'middle';
+      rows.forEach((r, k) => {
+        const x = (k % 2) * 256 + 16, y = 50 + Math.floor(k / 2) * 70;
+        g.fillStyle = '#8D9AB5'; g.font = '500 20px "JetBrains Mono", monospace'; g.textAlign = 'left'; g.fillText(r[0], x, y);
+        g.fillStyle = r[0] === 'faults' && r[1] ? '#FF4D6A' : '#DCE5F5'; g.font = '600 38px "JetBrains Mono", monospace'; g.fillText(String(r[1]), x, y + 30);
+      });
+      holo.tex.needsUpdate = true;
+    }
+
+    /* ---- effects */
+    const fx = [], gRing = new THREE.RingGeometry(0.4, 0.55, 48);
+    function packet(from, to, color, dur, arc, size) {
+      const m = new THREE.Mesh(gBall, new THREE.MeshBasicMaterial({ color })); m.scale.setScalar(size || 1); world.add(m);
+      fx.push({ k: 'p', m, from, to, t: 0, dur, arc });
+    }
+    function shock(pos, color, max, dur) {
+      const m = new THREE.Mesh(gRing, new THREE.MeshBasicMaterial({ color, transparent: true, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending }));
+      m.rotation.x = -Math.PI / 2; m.position.copy(pos); world.add(m);
+      fx.push({ k: 's', m, t: 0, dur, max });
+    }
+    function handle(e) {
+      const z = LANE_Z(e.i);
+      if (e.t === 'submit') packet(V(-19, 2.6, z), V(SLOT_X(e.slot), 0.6, z), CH[e.i], 0.55, 1.6, 0.9);
+      else if (e.t === 'retire') packet(V(SLOT_X(e.slot), 0.6, z), V(BUS_END + 1.4, 0.9, 0), CH[e.i], 0.8, 1.2, 1);
+      else if (e.t === 'park') shock(V(SLOT_X(S.ch[e.i].get % RING), 0.2, z), WARN, 3, 0.9);
+      else if (e.t === 'resume') shock(V(SLOT_X(S.ch[e.i].get % RING), 0.2, z), OK, 3, 0.8);
+      else if (e.t === 'recover') shock(V(-8, 0.1, z), OK, 5, 0.9);
+      else if (e.t === 'fault') { shock(V(0, 0.1, z), BAD, 10, 1.2); flash = 1; }
+      else if (e.t === 'rel') packet(V(ENG_X, 2.2, 0), V(PIL_X(e.s), 1.3, -5.4), ACC, 0.9, 2.6, 0.85);
+    }
+
+    /* ---- post-processing */
+    let composer = null, bloom = null;
+    if (THREE.EffectComposer && THREE.RenderPass && THREE.UnrealBloomPass) {
+      try {
+        composer = new THREE.EffectComposer(renderer);
+        composer.addPass(new THREE.RenderPass(scene, camera));
+        bloom = new THREE.UnrealBloomPass(new THREE.Vector2(512, 512), 0.65, 0.55, 0.2);
+        composer.addPass(bloom);
+      } catch (e) { composer = null; bloom = null; }
+    }
+
+    /* ---- camera, pointer, 3D pads */
+    let yaw = 0, pitch = 0.74, tYaw = 0, tPitch = 0.74, dragging = false, moved = 0, lx = 0, ly = 0, mx = 0, my = 0, worldRot = 0;
+    const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), tip = $('tip');
+    let hovered = null;
+    function pickPad(cx, cy) {
+      const r = canvas.getBoundingClientRect();
+      ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, camera);
+      const hit = ray.intersectObjects(PADS.filter(p => p.m.visible).map(p => p.m), false)[0];
+      return hit ? hit.object.userData.pad : null;
+    }
+    const TIPS = { job: 'submit a job', hang: 'submit a method that hangs the engine', bad: 'submit an unknown opcode', rec: 'recover this channel' };
+    canvas.addEventListener('pointerdown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; canvas.classList.add('drag'); try { canvas.setPointerCapture(e.pointerId); } catch (_) {} });
+    canvas.addEventListener('pointermove', e => {
+      const r = canvas.getBoundingClientRect();
+      mx = (e.clientX - r.left) / r.width - 0.5; my = (e.clientY - r.top) / r.height - 0.5;
+      if (dragging) {
+        moved += Math.abs(e.clientX - lx) + Math.abs(e.clientY - ly);
+        tYaw = clamp(tYaw - (e.clientX - lx) * 0.006, -1.4, 1.4);
+        if (e.pointerType !== 'touch') tPitch = clamp(tPitch + (e.clientY - ly) * 0.004, 0.2, 1.3);
+        lx = e.clientX; ly = e.clientY;
+      } else if (e.pointerType !== 'touch') {
+        hovered = pickPad(e.clientX, e.clientY);
+        canvas.classList.toggle('hover', !!hovered);
+        if (hovered) { tip.hidden = false; tip.textContent = NAMES[hovered.i] + ': ' + TIPS[hovered.a]; tip.style.left = e.clientX + 'px'; tip.style.top = e.clientY + 'px'; }
+        else tip.hidden = true;
+      }
+    });
+    canvas.addEventListener('pointerup', e => {
+      dragging = false; canvas.classList.remove('drag');
+      if (moved < 6) { const p = pickPad(e.clientX, e.clientY); if (p) { act(p.i, p.a); p.hover = 1.5; } }
+    });
+    canvas.addEventListener('pointercancel', () => { dragging = false; canvas.classList.remove('drag'); });
+    canvas.addEventListener('pointerleave', () => { hovered = null; tip.hidden = true; canvas.classList.remove('hover'); });
+    canvas.addEventListener('dblclick', () => { tYaw = 0; tPitch = 0.74; });
+
+    let W = 0, H = 0, frameN = 0, lastT = performance.now(), padW = 0, topPad = 100, botPad = 160;
+    const target = V(CX, 0, 0.3), tLocal = V(CX, 0, 0.3), tmpV = V(0, 0, 0);
+    let zoom = 1, zoomT = 1, hlOn = false, hlPulse = 0;
+    const hlFill = new THREE.Mesh(gUnit, new THREE.MeshBasicMaterial({ color: ACC, transparent: true, opacity: 0.1, depthWrite: false, blending: THREE.AdditiveBlending }));
+    const hlEdge = new THREE.LineSegments(new THREE.EdgesGeometry(gUnit), new THREE.LineBasicMaterial({ color: ACC, transparent: true, opacity: 0.9 }));
+    hlFill.visible = hlEdge.visible = false; world.add(hlFill); world.add(hlEdge);
+    function focus(f) {
+      if (!f) { tLocal.set(CX, 0, 0.3); zoomT = 1; tYaw = 0; tPitch = 0.74; hlOn = false; hlFill.visible = hlEdge.visible = false; return; }
+      tLocal.set(f.x, f.y, f.z); zoomT = f.zoom || 1;
+      tYaw = f.yaw != null ? f.yaw : 0; tPitch = f.pitch != null ? f.pitch : 0.74;
+      const r = f.hl; hlOn = !!r; hlFill.visible = hlEdge.visible = hlOn;
+      if (r) { hlFill.position.set(r.x, r.y, r.z); hlEdge.position.copy(hlFill.position); hlFill.scale.set(r.w, r.h, r.d); hlEdge.scale.copy(hlFill.scale); }
+    }
+    const topEl = document.querySelector('.top'), dockEl = document.querySelector('.dock');
+
+    function layout() {
+      const w = window.innerWidth, h = window.innerHeight;
+      if (w !== W || h !== H) {
+        W = w; H = h; renderer.setSize(w, h, false);
+        if (composer) composer.setSize(w, h);
+        camera.aspect = w / h;
+      }
+      const panelOn = getComputedStyle(panel).display !== 'none' && window.innerWidth > 1000;
+      padW = panelOn ? panel.offsetWidth + 40 : 0;
+      topPad = topEl.getBoundingClientRect().bottom + 8;
+      botPad = H - dockEl.getBoundingClientRect().top + 8;
+    }
+
+    function update(evs) {
+      const now = performance.now(), dt = Math.min(0.05, (now - lastT) / 1000); lastT = now; frameN++;
+      const t = now / 1000;
+      if (frameN % 10 === 1) layout();
+      const portrait = W / H < 0.9;
+      worldRot += ((portrait ? Math.PI / 2 : 0) - worldRot) * 0.08; world.rotation.y = worldRot;
+      monitor.visible = !portrait;
+
+      /* camera */
+      const par = reduce ? 0 : 1;
+      const drift = (reduce || dragging) ? 0 : Math.sin(t * 0.18) * 0.1;
+      yaw += (tYaw + drift + mx * 0.2 * par - yaw) * 0.08;
+      pitch += (tPitch + my * 0.08 * par - pitch) * 0.08;
+      const tanV = Math.tan(camera.fov * Math.PI / 360);
+      const availW = Math.max(200, W - padW), availH = Math.max(160, H - topPad - botPad);
+      const ext = portrait ? { w: 15, d: 31 } : { w: 28, d: 15 };
+      const vExt = ext.d * Math.sin(pitch) + 7 * Math.cos(pitch);
+      const dist = Math.max(15, ext.w / (2 * tanV * (availW / H)), vExt / (2 * tanV * (availH / H)));
+      world.updateMatrixWorld(true);
+      tmpV.copy(tLocal); world.localToWorld(tmpV);
+      target.lerp(tmpV, 0.07); zoom += (zoomT - zoom) * 0.07;
+      const dz = dist * zoom;
+      camera.setViewOffset(W, H, padW / 2, (botPad - topPad) / 2, W, H);
+      camera.position.set(target.x + dz * Math.sin(yaw) * Math.cos(pitch), target.y + dz * Math.sin(pitch), target.z + dz * Math.cos(yaw) * Math.cos(pitch));
+      camera.lookAt(target);
+      scene.fog.near = dist * 0.85; scene.fog.far = dist * 2.4;
+      if (hlOn) { hlPulse += dt * 3; const k = 0.5 + 0.5 * Math.sin(hlPulse); hlFill.material.opacity = 0.06 + 0.1 * k; hlEdge.material.opacity = 0.55 + 0.45 * k; }
+      if (!reduce) { dust.rotation.y += dt * 0.01; dust.position.y = Math.sin(t * 0.3) * 0.3; }
+
+      /* events -> effects */
+      for (const e of (evs || [])) handle(e);
+      for (let k = fx.length - 1; k >= 0; k--) {
+        const f = fx[k]; f.t += dt; const p = Math.min(1, f.t / f.dur);
+        if (f.k === 'p') { f.m.position.lerpVectors(f.from, f.to, p); f.m.position.y += f.arc * Math.sin(Math.PI * p) * 0.5; }
+        else { f.m.scale.setScalar(1 + (f.max - 1) * p); f.m.material.opacity = (1 - p) * 0.9; }
+        if (p >= 1) { world.remove(f.m); f.m.material.dispose(); fx.splice(k, 1); }
+      }
+
+      /* lanes */
+      S.ch.forEach((c, i) => {
+        const L = lanes[i], col = CH[i], depth = c.put - c.get;
+        const faulted = c.status !== 'OK', run = S.active === i;
+        const pm = L.plate.material; pm.color.copy(DARK); pm.emissive.setRGB(0, 0, 0);
+        let edgeCol = col, edgeOp = 0.5;
+        if (faulted) { pm.emissive.copy(BAD).multiplyScalar(0.35); edgeCol = BAD; edgeOp = 1; }
+        else if (run) { pm.emissive.copy(col).multiplyScalar(0.25); edgeOp = 1; }
+        else if (c.parked) { const k = 0.5 + 0.5 * Math.sin(t * 5); pm.emissive.copy(WARN).multiplyScalar(0.12 + 0.12 * k); edgeCol = WARN; edgeOp = 0.5 + 0.5 * k; }
+        L.plateE.material.color.copy(edgeCol); L.plateE.material.opacity = edgeOp;
+        L.plate.position.x = faulted && !reduce ? Math.sin(t * 40) * 0.04 : 0;
+        L.slots.forEach((sl, s) => {
+          let kind = 0;
+          for (let j = 0; j < depth; j++) if ((c.get + j) % RING === s) kind = j === 0 ? 2 : 1;
+          sl.h += ((kind === 2 ? 1.9 : kind === 1 ? 1.0 : 0.3) - sl.h) * 0.25;
+          sl.m.scale.y = sl.h; sl.m.position.y = 0.25 * sl.h;
+          const mat = sl.m.material, em = sl.e.material;
+          if (kind === 0) { mat.color.copy(DARK); mat.emissive.setRGB(0, 0, 0); mat.opacity = 0.6; em.color.copy(col); em.opacity = 0.28; }
+          else {
+            mat.opacity = 1; mat.color.copy(col).multiplyScalar(0.5);
+            mat.emissive.copy(col).multiplyScalar(kind === 2 ? (run ? 0.9 : 0.55) : 0.3);
+            em.color.copy(col); em.opacity = 1;
+            if (kind === 2 && c.parked) { const k = 0.5 + 0.5 * Math.sin(t * 5); mat.emissive.copy(WARN).multiplyScalar(0.35 + 0.3 * k); em.color.copy(WARN); }
+          }
+        });
+        const gx = SLOT_X(c.get % RING), px = SLOT_X(c.put % RING);
+        L.getX += (gx - L.getX) * 0.3; L.putX += (px - L.putX) * 0.3;
+        L.getC.position.set(L.getX, (depth > 0 ? 1.55 : 0.75) + Math.sin(t * 3) * 0.04, LANE_Z(i));
+        L.putC.position.set(L.putX, 2.35 + Math.sin(t * 3 + 1) * 0.04, LANE_Z(i));
+        if (run) {
+          const x0 = SLOT_X(c.get % RING) + 0.45, len = BUS_END - x0;
+          L.beam.visible = true; L.beam.scale.x = len; L.beam.position.set(x0 + len / 2, 0.7, LANE_Z(i));
+          const e = c.ring[c.get % RING], m = e && e[c.cursor], hang = m && m.op === 'HANG';
+          L.beam.material.color.copy(hang ? BAD : col);
+          const p = hang ? ((t * 0.8) % 1) : (m && isFinite(S.remaining) ? 1 - S.remaining / COST[m.op] : 0);
+          L.ball.visible = true; L.ball.material.color.copy(hang ? BAD : col);
+          L.ball.position.set(x0 + len * clamp(p, 0, 1), 0.7, LANE_Z(i));
+        } else { L.beam.visible = false; L.ball.visible = false; }
+        setLabel(L.st, faulted ? 'FAULT' : run ? 'running' : c.parked ? 'parked' : depth > 0 ? depth + ' queued' : 'idle');
+      });
+      PADS.forEach(p => {
+        const L = S.ch[p.i];
+        const show = p.a === 'rec' ? L.status !== 'OK' : true;
+        p.m.visible = show; p.tl.sp.visible = show;
+        const isH = hovered === p; p.hover = Math.max(isH ? 1 : 0, p.hover - dt * 3);
+        p.m.position.y = -0.02 + p.hover * 0.12;
+        p.m.material.emissive.copy(p.base).multiplyScalar(0.2 + p.hover * 0.6);
+      });
+
+      /* engine */
+      const act0 = S.active, c0 = act0 >= 0 ? S.ch[act0] : null;
+      const m0 = c0 ? c0.ring[c0.get % RING][c0.cursor] : null, hung = !!(m0 && m0.op === 'HANG');
+      const ec = act0 < 0 ? DIM : hung ? BAD : CH[act0];
+      core.material.color.copy(ec).multiplyScalar(act0 < 0 ? 1 : 0.5); core.material.emissive.copy(ec).multiplyScalar(act0 < 0 ? 0.15 : 0.8);
+      wire.material.color.copy(act0 < 0 ? ACC : ec); orbA.material.color.copy(act0 < 0 ? ACC : ec); orbB.material.color.copy(act0 < 0 ? ACC : ec);
+      engLight.color.copy(act0 < 0 ? ACC : ec); engLight.intensity = act0 < 0 ? 0.8 : 1.8;
+      const spin = act0 < 0 ? 0.25 : hung ? 2.4 : 1.1;
+      if (!reduce) {
+        core.rotation.y += dt * 1.0 * spin; core.rotation.x += dt * 0.5 * spin; wire.rotation.y -= dt * 0.6 * spin;
+        orbA.rotation.x += dt * 0.7 * spin; orbB.rotation.y += dt * 0.5 * spin; orbB.rotation.x = 1.1;
+      }
+      eng.position.x = ENG_X + (hung && !reduce ? Math.sin(t * 50) * 0.07 : 0);
+      eng.position.y = 0.9 + (reduce ? 0 : Math.sin(t * 1.5) * 0.08);
+      const frac = act0 >= 0 ? clamp((S.now - S.activeSince) / WD, 0, 1) : 0;
+      const th = Math.max(0.01, Math.round(frac * 64) / 64 * Math.PI * 2);
+      if (th !== wdTheta) { wdTheta = th; wdRing.geometry.dispose(); wdRing.geometry = new THREE.RingGeometry(2.6, 2.9, 64, 1, 0, th); }
+      wdRing.visible = act0 >= 0; wdRing.material.color.copy(frac > 0.7 ? BAD : ACC);
+
+      /* semaphores, memory */
+      pillars.forEach((p, k) => {
+        const v = S.sem[k];
+        if (v !== p.v) { p.v = v; p.flash = 1; }
+        p.flash = Math.max(0, p.flash - dt * 1.8);
+        p.h += ((0.2 + Math.min(v, 3) * 0.6) - p.h) * 0.2;
+        p.m.scale.y = p.h; p.m.position.y = p.h / 2 - 0.1;
+        p.m.material.color.copy(v > 0 ? ACC : DARK).multiplyScalar(v > 0 ? 0.55 : 1);
+        p.m.material.emissive.copy(ACC).multiplyScalar((v > 0 ? 0.25 : 0) + p.flash * 0.9);
+      });
+      tiles.forEach((tl, k) => {
+        const w2 = S.vram[k];
+        tl.m.material.color.copy(w2 < 0 ? DARK : CH[w2]).multiplyScalar(w2 < 0 ? 1 : 0.5);
+        tl.m.material.emissive.copy(w2 < 0 ? DARK : CH[w2]).multiplyScalar(w2 < 0 ? 0 : 0.6);
+      });
+
+      /* log wall + hologram refresh */
+      if (mon.n !== S.log.length || mon.ref !== S) { mon.n = S.log.length; mon.ref = S; paintMonitor(); }
+      const sig = Object.values(S.stats).join(',');
+      if (holo.sig !== sig) { holo.sig = sig; paintHolo(); }
+
+      flash = Math.max(0, flash - dt * 1.6);
+      if (bloom) bloom.strength = 0.65 + flash * 0.8;
+      if (composer) composer.render(); else renderer.render(scene, camera);
+    }
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { labels.forEach(paintLabel); mon.n = -1; holo.sig = ''; });
+    return { update, focus };
+  }
+
+  /* ----------------------------------------------------------- guided tour */
+  const TZ = i => (i - 1.5) * 1.55;
+  const laneF = i => ({ x: -0.5, y: 0, z: TZ(i), zoom: 0.62, pitch: 0.62, hl: { x: 0, y: 0.3, z: TZ(i), w: 16.9, h: 1.7, d: 1.4 } });
+  const ENGF = { x: 10, y: 0.6, z: 0, zoom: 0.68, pitch: 0.6, hl: { x: 11.5, y: 0.7, z: 0, w: 6.4, h: 3.4, d: 6.4 } };
+  const PILF = { x: 0.5, y: 0.4, z: -3.2, zoom: 0.62, pitch: 0.65, hl: { x: 0.5, y: 0.6, z: -5.4, w: 13.8, h: 1.8, d: 1.4 } };
+  const ALLF = { x: 0, y: 0, z: 0, zoom: 0.8, pitch: 0.7, hl: { x: 0, y: 0.3, z: 0, w: 17, h: 1.8, d: 6.6 } };
+  const TOUR = [
+    { t: 'One engine, many apps', scenario: 'intro', play: false, focus: null,
+      body: 'A GPU has one engine that does the real work. But many programs want it at once: a game, a browser, a video app. Picture a kitchen with one chef (the glowing sphere) and four customers (the coloured lanes), each handing in order tickets.',
+      tech: 'Modelled on the NVIDIA-style channel model: channels, a GPFIFO ring per channel, semaphores, one engine thread and one watchdog thread. Written in C11 with pthreads.' },
+    { t: 'Every app gets its own tray', scenario: 'ring', play: false, focus: laneF(0),
+      body: 'Each app gets a channel: a private queue. The queue is a ring of 16 slots, and each block is one batch of work, a ticket. The blue cone (PUT) is where the app adds the next ticket. The white cone (GET) is where the engine reads next. The pads on the left let you add tickets yourself.',
+      tech: 'GP_PUT and GP_GET are free-running 32-bit counters. Slot = index & 15. The ring is full when put - get >= 16, and that stays correct when the counters wrap around.' },
+    { t: 'The engine takes turns', scenario: 'rr', play: true, focus: ALLF,
+      body: 'The engine runs one ticket from one channel, then moves to the next channel that has work. Nobody can hog it. Watch the engine change colour as it switches between customers, and the beam that connects it to the lane it is serving.',
+      tech: 'One GPFIFO entry per timeslice, round-robin with an rr_next cursor. It picks the next channel that has work and can make progress.' },
+    { t: 'Bells between jobs', scenario: 2, play: false, focus: PILF,
+      body: 'Sometimes one job needs the result of another, like frying needs chopping to be finished. The pillars are semaphores: shared counters that work as bells. A job rings a bell when it is done (release). Another job can wait until that bell has rung (acquire). Press Play to watch it happen.',
+      tech: 'SEM_RELEASE writes a value. SEM_ACQUIRE waits until value >= wanted, compared wrap-safe as (int32_t)(cur - want) >= 0. This is how fences and cross-channel dependencies work.' },
+    { t: 'Waiting without blocking everyone', scenario: 2, play: true, focus: laneF(3),
+      body: 'The render lane needs a bell that has not rung yet. It does not stand at the engine doing nothing. It is parked (amber) with its place saved, and the engine serves others. When the bell rings, render picks up at the exact step where it stopped.',
+      tech: 'Parking saves the cursor inside the entry. Counted as a context switch. The channel becomes runnable again once the semaphore is reached.' },
+    { t: 'When a job hangs: the watchdog', scenario: 1, play: true, focus: ENGF,
+      body: 'The buggy lane gets stuck forever. Without protection, the whole GPU would freeze. A watchdog timer measures how long the engine stays on one ticket. The ring around the engine is that timer. At 400 ms it cuts buggy off (red) and throws away its queue.',
+      tech: 'A separate watchdog thread checks every timeout/4, so detection takes 1x to 1.25x the timeout. It sets reset_req and faults the channel; the engine aborts the entry.' },
+    { t: 'One crash must not take down everyone', scenario: 3, play: true, focus: ALLF,
+      body: 'buggy sends a command the engine does not understand. Only buggy is marked FAULT. The other three finish their work as normal. A faulted lane can be recovered with the green pad, then used again.',
+      tech: 'Unknown opcode, wrong argument count, out-of-range memory and bad semaphore id each fault only the offending channel. gpu_channel_recover clears the fault and empties the ring.' },
+    { t: 'What if the helper never finishes?', scenario: 4, play: true, focus: laneF(0),
+      body: 'compute waits for a bell that buggy was supposed to ring, but buggy crashed first. Nobody will ever ring it. With the acquire timeout on, compute is stopped after 400 ms instead of waiting forever. Untick the box, restart, and it waits for good.',
+      tech: 'Opt-in, because it cannot tell a dead producer from a slow one. It is the same trade-off as the hang watchdog, which is why the timeout is configurable.' },
+    { t: 'The queue can be full', scenario: 5, play: true, focus: laneF(0),
+      body: 'If an app adds tickets faster than the engine finishes them, all 16 slots fill up. The next submit is refused with EAGAIN, meaning "try again later". The app slows down instead of piling up work without limit. This is called back-pressure.',
+      tech: 'gpu_submit returns -EAGAIN when put - get >= 16, and -EIO once the channel is faulted. The host can retry, as the stress tests do.' },
+    { t: 'Why the ring is fast: no waiting', scenario: 'ring', play: true, focus: laneF(0),
+      body: 'The app and the engine never make each other wait to move work. The app writes the ticket first, and only then moves PUT. The engine reads PUT first, and only then reads the ticket. "Write the data, then publish the pointer" is the idea behind release and acquire ordering.',
+      tech: 'C11 _Atomic GP_PUT / GP_GET with memory_order_release stores and acquire loads (single producer, single consumer). A per-channel submit_lock turns many host threads into one producer. Verified under ThreadSanitizer.' },
+    { t: 'Now you try', scenario: 1, play: false, focus: null, last: true,
+      body: 'Click the coloured pads in front of each lane: job (normal work), hang (stuck), bad (invalid command). Use the green pad to recover a red lane. Try to make the engine hang while the other lanes keep working. Drag to look around.',
+      tech: 'All of this runs the same logic as the C simulator, so what you see here is what its tests check.',
+      sum: ['Concurrency in C11: a lock-free SPSC ring with acquire/release ordering',
+            'Scheduling: round-robin timeslices and parking on semaphore waits',
+            'Reliability: a watchdog, fault isolation, recovery and acquire timeouts',
+            'Testing: 93 checks under gcc, clang, ASan/UBSan and ThreadSanitizer, with CI on Linux and macOS'] }
+  ];
+  let tourOn = false, tourIdx = 0;
+  const dockEl2 = $('dock'), tourEl = $('tour'), dotsEl = $('tcDots');
+  TOUR.forEach(() => dotsEl.appendChild(document.createElement('i')));
+  const NARROW = () => window.matchMedia('(max-width:1000px)').matches;
+
+  /* ----------------------------------------------------------- hash routing */
+  let hashLock = false;
+  function setHash(h) {
+    try { if (location.hash.slice(1) !== h) { hashLock = true; location.hash = h; } } catch (_) {}
+  }
+
+  /* ------------------------------------------------------------ language */
+  let lang = 'en';
+  try { lang = localStorage.getItem('gcl-lang') === 'hi' ? 'hi' : 'en'; } catch (_) {}
+  const UI = {
+    en: { back: 'Back', replay: 'Replay', pause: 'Pause', play: 'Play', next: 'Next', finish: 'Finish', exit: 'Exit tour', step: 'STEP', tech: 'Under the hood',
+      lang: 'Hinglish', nar: 'Narrate', introT: 'What am I looking at?',
+      p1: 'This is a live model of how a graphics chip (a GPU) shares <b>one engine</b> between <b>many programs</b> at the same time.',
+      p2: 'Think of a kitchen with one chef and four customers. Each customer hands in order tickets. The chef cooks one ticket at a time and rotates between customers, so nobody waits forever. If one order burns, or a customer\'s helper never shows up, the kitchen must not stop for everyone. A GPU scheduler solves exactly this problem, and you can play with it here.',
+      dl: [['Chef', 'the engine (the glowing sphere)'], ['Customer', 'an app, called a channel (the four coloured lanes)'], ['Ticket', 'one batch of work (a block on a lane)'], ['Bell', 'a semaphore: a "this is done" signal (the pillars)'], ['Kitchen timer', 'the watchdog (the ring around the engine)']],
+      tour: 'Take the 2-minute tour', skip: 'Explore on my own' },
+    hi: { back: 'Peeche', replay: 'Phir se', pause: 'Roko', play: 'Chalao', next: 'Agla', finish: 'Khatam', exit: 'Tour band', step: 'STEP', tech: 'Andar kya hota hai',
+      lang: 'English', nar: 'Awaaz mein', introT: 'Ye kya hai?',
+      p1: 'Ye ek live model hai jo dikhata hai ki ek graphics chip (GPU) <b>ek engine</b> ko <b>kai programs</b> ke beech ek saath kaise baantta hai.',
+      p2: 'Socho ek kitchen hai jisme ek chef aur chaar customers hain. Har customer order tickets deta hai. Chef ek waqt mein ek ticket pakata hai aur customers ke beech baari-baari ghoomta hai, taaki koi hamesha intezaar na kare. Agar ek order jal jaye, ya kisi customer ka helper aaye hi nahi, to poori kitchen band nahi honi chahiye. GPU scheduler bilkul yahi problem solve karta hai, aur aap yahan khud khel kar dekh sakte ho.',
+      dl: [['Chef', 'engine (chamakta gola)'], ['Customer', 'ek app, jise channel kehte hain (chaar rangeen lanes)'], ['Ticket', 'kaam ka ek batch (lane par ek block)'], ['Ghanti', 'semaphore: "ye ho gaya" ka signal (pillars)'], ['Kitchen timer', 'watchdog (engine ke chaaron taraf ka ring)']],
+      tour: '2 minute ka tour lo', skip: 'Khud dekhta hoon' }
+  };
+  const HI_TOUR = [
+    { t: 'Ek engine, bahut saare apps', body: 'Ek GPU mein ek hi engine hota hai jo asli kaam karta hai. Lekin kai programs ek saath use karna chahte hain: game, browser, video app. Socho ek kitchen hai jisme ek chef (chamakta gola) hai aur chaar customers (rangeen lanes), jo order tickets dete hain.' },
+    { t: 'Har app ki apni tray', body: 'Har app ko ek channel milta hai: uski apni private queue. Queue 16 slots ka ek ring hai, aur har block ek batch of work, yaani ek ticket hai. Neela cone (PUT) wo jagah hai jahan app agla ticket rakhta hai. Safed cone (GET) wo jagah hai jahan se engine agla padhta hai. Left ke pads se aap khud ticket daal sakte ho.' },
+    { t: 'Engine baari-baari kaam karta hai', body: 'Engine ek channel ka ek ticket chalata hai, phir agle channel par jaata hai jiske paas kaam ho. Koi sabko rok nahi sakta. Dekho engine ka rang kaise badalta hai, aur kaunsi lane se beam judti hai.' },
+    { t: 'Jobs ke beech ghanti (semaphore)', body: 'Kabhi ek job ko doosri job ka result chahiye hota hai, jaise talna tab shuru ho jab kaatna khatam ho. Pillars semaphores hain: shared counters jo ghanti ki tarah kaam karte hain. Ek job kaam khatam hone par ghanti bajata hai (release). Doosri job us ghanti ke bajne tak wait kar sakti hai (acquire). Play dabao aur dekho.' },
+    { t: 'Wait karo, par sabko mat roko', body: 'Render lane ko ek ghanti chahiye jo abhi baji nahi. Wo engine ke saamne khadi nahi rehti. Use park kar diya jata hai (amber), apni jagah yaad rakhte hue, aur engine doosron ko serve karta hai. Ghanti bajte hi render wahi step se aage badhta hai jahan ruka tha.' },
+    { t: 'Job hang ho to watchdog', body: 'Buggy lane hamesha ke liye atak jaati hai. Bina protection ke poora GPU freeze ho jata. Watchdog ek timer hai jo naapta hai ki engine ek ticket par kitni der se hai. Engine ke chaaron taraf ka ring wahi timer hai. 400 ms par wo buggy ko kaat deta hai (laal) aur uski queue phenk deta hai.' },
+    { t: 'Ek crash sabko nahi girana chahiye', body: 'Buggy aisa command bhejta hai jo engine samajhta hi nahi. Sirf buggy FAULT hota hai. Baaki teen apna kaam normal khatam karte hain. Faulted lane ko hare pad se recover karke dobara use kar sakte ho.' },
+    { t: 'Agar helper kabhi khatam hi na kare?', body: 'Compute ek aisi ghanti ka wait kar raha hai jo buggy bajane wala tha, par buggy pehle hi crash ho gaya. Ab koi nahi bajayega. Acquire timeout ON ho to compute 400 ms baad rok diya jata hai, hamesha wait nahi karta. Box untick karke restart karo, to wo hamesha wait karta rahega.' },
+    { t: 'Queue bhar sakti hai', body: 'Agar app engine se tez ticket daalta hai, to 16 ke 16 slots bhar jaate hain. Agla submit EAGAIN ke saath mana ho jata hai, yaani "baad mein try karo". App dheema ho jata hai, kaam ka dher nahi lagta. Isse back-pressure kehte hain.' },
+    { t: 'Ring tez kyun hai: koi wait nahi', body: 'App aur engine ek doosre ko wait karwaye bina kaam aage-peeche karte hain. App pehle ticket likhta hai, aur usi ke baad PUT aage badhata hai. Engine pehle PUT padhta hai, aur usi ke baad ticket padhta hai. "Pehle data likho, phir pointer publish karo", yahi release aur acquire ordering ka idea hai.' },
+    { t: 'Ab aap try karo', body: 'Har lane ke saamne rangeen pads dabao: job (normal kaam), hang (atka hua), bad (galat command). Laal lane ko theek karne ke liye hara pad dabao. Koshish karo ki engine hang ho jaye jabki baaki lanes chalti rahein. Ghumane ke liye drag karo.' }
+  ];
+  const stepText = i => (lang === 'hi' && HI_TOUR[i]) ? HI_TOUR[i] : TOUR[i];
+
+  function applyLang() {
+    const u = UI[lang];
+    $('introT').textContent = u.introT; $('introP1').innerHTML = u.p1; $('introP2').textContent = u.p2;
+    $('introDl').innerHTML = u.dl.map(r => '<dt>' + r[0] + '</dt><dd>' + r[1] + '</dd>').join('');
+    $('introTour').textContent = u.tour; $('introSkip').textContent = u.skip; $('introLang').textContent = u.lang;
+    $('tcBack').textContent = u.back; $('tcReplay').textContent = u.replay; $('tcExit').textContent = u.exit; $('tcLang').textContent = u.lang;
+    $('tcTechSum').textContent = u.tech; $('tcNarLbl').textContent = u.nar;
+    if (tourOn) renderStep(); else { syncTourPlay(); }
+    try { document.documentElement.lang = lang === 'hi' ? 'hi-Latn' : 'en'; } catch (_) {}
+  }
+  function toggleLang() { lang = lang === 'en' ? 'hi' : 'en'; try { localStorage.setItem('gcl-lang', lang); } catch (_) {} applyLang(); if (presenter) speak(); }
+
+  /* ------------------------------------------------------------ tour */
+  function renderStep() {
+    const st = TOUR[tourIdx], tx = stepText(tourIdx), u = UI[lang];
+    $('tcStep').textContent = u.step + ' ' + (tourIdx + 1) + ' / ' + TOUR.length;
+    $('tcTitle').textContent = tx.t; $('tcBody').textContent = tx.body; $('tcTech').textContent = st.tech;
+    const sum = $('tcSum'); sum.innerHTML = '';
+    if (st.sum) st.sum.forEach(x => { const li = document.createElement('li'); li.textContent = x; sum.appendChild(li); });
+    sum.hidden = !st.sum;
+    [...dotsEl.children].forEach((d, k) => { d.className = k === tourIdx ? 'on' : k < tourIdx ? 'done' : ''; });
+    $('tcBack').disabled = tourIdx === 0;
+    $('tcNext').textContent = st.last ? u.finish : u.next;
+    syncTourPlay();
+  }
+  function showStep(n) {
+    tourIdx = Math.max(0, Math.min(TOUR.length - 1, n));
+    const st = TOUR[tourIdx];
+    load(st.scenario);
+    setPlaying(!!st.play);
+    if (stage) stage.focus(st.focus);
+    $('tcTechBox').removeAttribute('open');
+    renderStep();
+    setHash('tour-step-' + (tourIdx + 1));
+    if (presenter) { pT0 = performance.now(); pDur = stepDuration(tourIdx); speak(); }
+  }
+  function syncTourPlay() { $('tcPlay').textContent = playing ? UI[lang].pause : UI[lang].play; }
+  function startTour(at) {
+    tourOn = true; dockEl2.classList.add('tour'); tourEl.hidden = false; panel.classList.remove('open');
+    $('intro').hidden = true; showStep(at || 0);
+  }
+  function exitTour(quiet) {
+    if (!tourOn) return;
+    tourOn = false; dockEl2.classList.remove('tour'); tourEl.hidden = true;
+    if (presenter) stopPresenter();
+    if (stage) stage.focus(null);
+    if (!quiet) { load(curScenarioNum()); setHash('scenario-' + curScenarioNum()); }
+  }
+  const curScenarioNum = () => (typeof curScenario === 'number' ? curScenario : 1);
+  $('tcNext').addEventListener('click', () => { if (TOUR[tourIdx].last) exitTour(); else showStep(tourIdx + 1); });
+  $('tcBack').addEventListener('click', () => showStep(tourIdx - 1));
+  $('tcReplay').addEventListener('click', () => showStep(tourIdx));
+  $('tcPlay').addEventListener('click', () => { setPlaying(!playing); syncTourPlay(); });
+  $('tcExit').addEventListener('click', () => exitTour());
+  $('tcLang').addEventListener('click', toggleLang);
+  $('introLang').addEventListener('click', toggleLang);
+
+  /* ------------------------------------------------------------ presenter */
+  let presenter = false, pT0 = 0, pDur = 10000, pHold = false, narrate = false, speaking = false;
+  function stepDuration(i) { const tx = stepText(i); return (6 + (tx.t + ' ' + tx.body).split(/\s+/).length * 0.4) * 1000; }
+  function speak() {
+    if (!(presenter && narrate && 'speechSynthesis' in window)) { speaking = false; return; }
+    try {
+      speechSynthesis.cancel();
+      const tx = stepText(tourIdx), u = new SpeechSynthesisUtterance(tx.t + '. ' + tx.body);
+      u.lang = 'en-IN'; u.rate = 0.98; speaking = true;
+      const done = () => { speaking = false; pT0 = performance.now() - pDur + 900; };
+      u.onend = done; u.onerror = done; speechSynthesis.speak(u);
+    } catch (_) { speaking = false; }
+  }
+  function startPresenter() {
+    presenter = true; pHold = false; document.body.classList.add('present'); panel.classList.remove('open');
+    try { const p = document.documentElement.requestFullscreen && document.documentElement.requestFullscreen(); if (p && p.catch) p.catch(() => {}); } catch (_) {}
+    startTour(0); setHash('present');
+  }
+  function stopPresenter() {
+    presenter = false; speaking = false; document.body.classList.remove('present');
+    try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (_) {}
+    try { if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen(); } catch (_) {}
+  }
+  function presenterTick(rd) {
+    if (!presenter || !tourOn) return;
+    if (pHold) { pT0 += rd; return; }
+    const el = performance.now() - pT0;
+    $('pbarFill').style.width = Math.min(100, el / pDur * 100).toFixed(1) + '%';
+    if (el >= pDur && !speaking) { if (TOUR[tourIdx].last) exitTour(); else showStep(tourIdx + 1); }
+  }
+  $('tcNar').addEventListener('change', e => { narrate = e.target.checked; if (narrate) speak(); else { try { speechSynthesis.cancel(); } catch (_) {} speaking = false; } });
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { if (!$('intro').hidden) closeIntro(); else exitTour(); return; }
+    if (e.target && /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+    if (!tourOn) return;
+    if (e.key === 'ArrowRight') { if (!TOUR[tourIdx].last) showStep(tourIdx + 1); }
+    else if (e.key === 'ArrowLeft') showStep(tourIdx - 1);
+    else if (e.key === ' ' && presenter) { e.preventDefault(); pHold = !pHold; }
+  });
+
+  /* nav buttons */
+  const gb = document.createElement('button');
+  gb.type = 'button'; gb.className = 'tourbtn'; gb.innerHTML = '<b>Take the tour</b><span>explained simply</span>';
+  gb.addEventListener('click', () => startTour(0));
+  const pb = document.createElement('button');
+  pb.type = 'button'; pb.className = 'tourbtn'; pb.innerHTML = '<b>Present</b><span>auto tour, full screen</span>';
+  pb.addEventListener('click', startPresenter);
+  elScen.insertBefore(pb, elScen.firstChild); elScen.insertBefore(gb, elScen.firstChild);
+
+  /* first-visit intro */
+  function closeIntro() { $('intro').hidden = true; try { localStorage.setItem('gcl-seen', '1'); } catch (_) {} }
+  $('introTour').addEventListener('click', () => { closeIntro(); startTour(0); });
+  $('introSkip').addEventListener('click', closeIntro);
+
+  /* ------------------------------------------------------------ side panel tabs */
+  const TABS = [['control', 'Control'], ['code', 'Code'], ['order', 'Ordering'], ['bench', 'Benchmark'], ['play', 'Playground'], ['interview', 'Interview'], ['quiz', 'Quiz']];
+  const tabsEl = $('tabs'), tabBtns = {};
+  let curTab = 'control';
+  TABS.forEach(([id, label]) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.setAttribute('role', 'tab');
+    b.addEventListener('click', () => setTab(id)); tabsEl.insertBefore(b, $('panelClose')); tabBtns[id] = b;
+  });
+  function setTab(id, fromHash, silent) {
+    curTab = id; panel.dataset.tab = id;
+    Object.keys(tabBtns).forEach(k => tabBtns[k].setAttribute('aria-selected', String(k === id)));
+    document.querySelectorAll('.tabpane').forEach(p => { p.hidden = p.dataset.pane !== id; });
+    if (id === 'code') codeApply(true);
+    if (id === 'order') ordRender();
+    if (id === 'bench') benchRender();
+    if (id === 'control') tlLast = -1;
+    if (!fromHash) setHash('tab-' + id); else if (!silent && NARROW()) panel.classList.add('open');
+  }
+  try { new ResizeObserver(() => document.documentElement.style.setProperty('--pw', (panel.offsetWidth + 32) + 'px')).observe(panel); } catch (_) {}
+
+  /* ------------------------------------------------------------ engine timeline */
+  const tlCv = $('tl'), tlCtx = tlCv.getContext('2d');
+  const CHEX = ['#3DA5FF', '#FFA23A', '#38F2B4', '#B77CFF'];
+  let tlLast = -1, tlRef = null;
+  function drawTimeline() {
+    if (curTab !== 'control') return;
+    const n = S.ticks.length;
+    if (n === tlLast && tlRef === S) return;
+    tlLast = n; tlRef = S;
+    const w = tlCv.width, h = tlCv.height, colW = w / 300, g = tlCtx;
+    g.clearRect(0, 0, w, h);
+    g.font = '500 20px "JetBrains Mono", monospace'; g.textBaseline = 'middle';
+    const rowY = i => 46 + i * 44;
+    g.fillStyle = '#8D9AB5'; g.fillText('engine', 6, 20);
+    for (let i = 0; i < 4; i++) { g.fillStyle = 'rgba(255,255,255,.05)'; g.fillRect(0, rowY(i), w, 30); g.fillStyle = '#6d7a99'; g.fillText(NAMES[i], 6, rowY(i) + 15); }
+    const off = 300 - n;
+    for (let k = 0; k < n; k++) {
+      const v = S.ticks[k], act = (v & 7) - 1, pm = (v >> 3) & 15, fm = (v >> 7) & 15, x = (off + k) * colW;
+      if (act >= 0) { g.fillStyle = CHEX[act]; g.fillRect(x, 6, colW + 0.6, 28); g.fillRect(x, rowY(act), colW + 0.6, 30); }
+      for (let i = 0; i < 4; i++) {
+        if ((pm >> i) & 1) { g.fillStyle = 'rgba(255,209,102,.55)'; g.fillRect(x, rowY(i) + 8, colW + 0.6, 14); }
+        if ((fm >> i) & 1) { g.fillStyle = 'rgba(255,77,106,.85)'; g.fillRect(x, rowY(i), colW + 0.6, 30); }
+      }
+    }
+  }
+
+  /* ------------------------------------------------------------ live code panel */
+  const CODE = {"ring_doorbell": {"start": 210, "lines": ["/* Wake the engine after publishing GP_PUT. The engine checks GP_PUT and goes", " * to sleep under the device lock, so taking it here means the signal cannot", " * fall between its check and its sleep (no lost wakeup). This plays the role", " * of the doorbell register write; no ring data is touched under the lock. */", "static void ring_doorbell(gpu_dev_t *d)", "{", "    pthread_mutex_lock(&d->lock);", "    pthread_cond_signal(&d->work_cv);", "    pthread_mutex_unlock(&d->lock);", "}"]}, "gpu_submit": {"start": 562, "lines": ["int gpu_submit(gpu_dev_t *d, unsigned ch, const gpu_pb_t *pb)", "{", "    if (ch >= GPU_MAX_CHANNELS || pb == NULL || pb->n > GPU_PB_MAX_WORDS)", "        return -EINVAL;", "", "    channel_t *c = &d->ch[ch];", "    if (!atomic_load(&c->open))", "        return -EINVAL;", "", "    /* Producer side of the SPSC ring. The device lock is not taken to", "     * move the work; only the doorbell below touches it. */", "    pthread_mutex_lock(&c->submit_lock);", "    int rc = 0;", "    /* We are the only writer of GP_PUT (submit_lock), so relaxed is enough. */", "    uint32_t put = atomic_load_explicit(&c->gp_put, memory_order_relaxed);", "    /* ACQUIRE pairs with the engine's RELEASE of GP_GET: once a slot shows", "     * as free, the engine has finished reading it. */", "    uint32_t get = atomic_load_explicit(&c->gp_get, memory_order_acquire);", "", "    if (atomic_load(&c->status) != GPU_CH_OK)", "        rc = -EIO;", "    else if (put - get >= GPU_GPFIFO_ENTRIES)       /* wrap-safe distance  */", "        rc = -EAGAIN;", "    else {", "        gpu_pb_t *slot = &c->fifo[put & FIFO_MASK];", "        memcpy(slot->w, pb->w, pb->n * sizeof(uint32_t));", "        slot->n = pb->n;", "        /* RELEASE publish: the segment above is visible to any thread", "         * that ACQUIRE-loads this GP_PUT value. */", "        atomic_store_explicit(&c->gp_put, put + 1u, memory_order_release);", "        ring_doorbell(d);", "    }", "    pthread_mutex_unlock(&c->submit_lock);", "    return rc;", "}"]}, "pick_runnable": {"start": 319, "lines": ["/* Lock held. Round-robin over channels that have work and can make progress.", " * Returns the channel and, in *get_out, the GPFIFO entry to execute. */", "static channel_t *pick_runnable(gpu_dev_t *d, unsigned *idx_out,", "                                uint32_t *get_out)", "{", "    for (unsigned k = 0; k < GPU_MAX_CHANNELS; k++) {", "        unsigned i = (d->rr_next + k) % GPU_MAX_CHANNELS;", "        channel_t *c = &d->ch[i];", "", "        if (!atomic_load(&c->open) || atomic_load(&c->status) != GPU_CH_OK)", "            continue;", "        /* ACQUIRE pairs with the host's RELEASE publish in gpu_submit. */", "        uint32_t put = atomic_load_explicit(&c->gp_put, memory_order_acquire);", "        uint32_t get = atomic_load_explicit(&c->gp_get, memory_order_relaxed);", "        if (get == put)", "            continue;", "        if (c->waiting && !sem_reached(d->sem[c->wait_sem], c->wait_val))", "            continue;", "        c->waiting = false;", "        *idx_out = i;", "        *get_out = get;", "        return c;", "    }", "    return NULL;", "}"]}, "exec_entry": {"start": 223, "lines": ["/* Execute GPFIFO entry `get` of channel c from c->cursor.", " * Called WITHOUT the device lock held. The caller ACQUIRE-loaded GP_PUT", " * after the host published this slot, so its contents are visible here.", " * On EXEC_FAULT, *fault says why. */", "static exec_result_t exec_entry(gpu_dev_t *d, channel_t *c, uint32_t get,", "                                gpu_ch_status_t *fault)", "{", "    const gpu_pb_t *pb = &c->fifo[get & FIFO_MASK];", "", "    while (c->cursor < pb->n) {", "        uint32_t hdr   = pb->w[c->cursor];", "        uint32_t op    = hdr >> 24;", "        uint32_t nargs = hdr & 0x00FFFFFFu;", "        const uint32_t *a = &pb->w[c->cursor + 1];", "", "        if (nargs > pb->n - c->cursor - 1u) {", "            *fault = GPU_CH_FAULT_INVALID_METHOD;   /* args run off the end */", "            return EXEC_FAULT;", "        }", "", "        switch (op) {", "        case GPU_OP_NOP:", "            if (nargs != 0) goto bad_method;", "            break;", "", "        case GPU_OP_FILL:", "            if (nargs != 3) goto bad_method;", "            if (!range_ok(d, a[0], a[2])) goto bad_addr;", "            memset(d->vram + a[0], (int)(a[1] & 0xFFu), a[2]);", "            break;", "", "        case GPU_OP_COPY:", "            if (nargs != 3) goto bad_method;", "            if (!range_ok(d, a[0], a[2]) || !range_ok(d, a[1], a[2]))", "                goto bad_addr;", "            memmove(d->vram + a[0], d->vram + a[1], a[2]);", "            break;", "", "        case GPU_OP_SEM_RELEASE:", "            if (nargs != 2) goto bad_method;", "            if (a[0] >= GPU_NUM_SEMAPHORES) goto bad_addr;", "            pthread_mutex_lock(&d->lock);", "            d->sem[a[0]] = a[1];", "            pthread_cond_broadcast(&d->sem_cv);     /* wake host fences   */", "            pthread_mutex_unlock(&d->lock);", "            break;", "", "        case GPU_OP_SEM_ACQUIRE: {", "            if (nargs != 2) goto bad_method;", "            if (a[0] >= GPU_NUM_SEMAPHORES) goto bad_addr;", "            pthread_mutex_lock(&d->lock);", "            bool ready = sem_reached(d->sem[a[0]], a[1]);", "            if (!ready) {", "                c->waiting  = true;                 /* park; cursor kept  */", "                c->wait_sem = a[0];", "                c->wait_val = a[1];", "                c->wait_since_ms = now_ms();", "            }", "            pthread_mutex_unlock(&d->lock);", "            if (!ready)", "                return EXEC_BLOCKED;", "            break;", "        }", "", "        case GPU_OP_HANG: {", "            if (nargs != 0) goto bad_method;", "            /* Spin like a stuck shader until the watchdog pulls the plug. */", "            pthread_mutex_lock(&d->lock);", "            while (d->running && !c->reset_req) {", "                struct timespec ts = deadline_after(1);", "                pthread_cond_timedwait(&d->wd_cv, &d->lock, &ts);", "            }", "            pthread_mutex_unlock(&d->lock);", "            *fault = GPU_CH_FAULT_TIMEOUT;", "            return EXEC_FAULT;", "        }", "", "        default:", "            goto bad_method;", "        }", "", "        c->cursor += 1u + nargs;", "        pthread_mutex_lock(&d->lock);", "        d->stats.methods_done++;", "        pthread_mutex_unlock(&d->lock);", "    }", "    return EXEC_DONE;", "", "bad_method:", "    *fault = GPU_CH_FAULT_INVALID_METHOD;", "    return EXEC_FAULT;", "bad_addr:", "    *fault = GPU_CH_FAULT_BAD_ADDRESS;", "    return EXEC_FAULT;", "}"]}, "fault_channel": {"start": 345, "lines": ["/* Lock held, channel not executing on the engine. Drop all pending work", " * and mark the channel faulted. Entries the host publishes after this are", " * dead too (status is no longer OK); gpu_channel_recover() discards them. */", "static void fault_channel(gpu_dev_t *d, channel_t *c, gpu_ch_status_t why)", "{", "    int ok = GPU_CH_OK;", "    atomic_compare_exchange_strong(&c->status, &ok, (int)why);", "    atomic_store_explicit(&c->gp_get,", "                          atomic_load_explicit(&c->gp_put, memory_order_acquire),", "                          memory_order_release);", "    c->cursor  = 0;", "    c->waiting = false;", "    d->stats.faults++;", "    pthread_cond_broadcast(&d->idle_cv);", "}"]}, "engine_main": {"start": 361, "lines": ["static void *engine_main(void *arg)", "{", "    gpu_dev_t *d = arg;", "", "    pthread_mutex_lock(&d->lock);", "    while (d->running) {", "        unsigned idx;", "        uint32_t get;", "        channel_t *c = pick_runnable(d, &idx, &get);", "        if (c == NULL) {", "            pthread_cond_wait(&d->work_cv, &d->lock);", "            continue;", "        }", "", "        d->active = c;", "        d->active_since_ms = now_ms();", "        c->reset_req = false;", "        pthread_mutex_unlock(&d->lock);", "", "        gpu_ch_status_t why = GPU_CH_OK;", "        exec_result_t r = exec_entry(d, c, get, &why);", "", "        pthread_mutex_lock(&d->lock);", "        d->active = NULL;", "        d->rr_next = (idx + 1u) % GPU_MAX_CHANNELS;", "", "        if (c->reset_req && r != EXEC_FAULT) {      /* watchdog raced us   */", "            r = EXEC_FAULT;", "            why = GPU_CH_FAULT_TIMEOUT;", "        }", "        switch (r) {", "        case EXEC_DONE:", "            c->cursor = 0;", "            /* RELEASE: all our reads of the slot happen before the host", "             * can see it free and overwrite it. */", "            atomic_store_explicit(&c->gp_get, get + 1u, memory_order_release);", "            d->stats.entries_done++;", "            pthread_cond_broadcast(&d->idle_cv);", "            break;", "        case EXEC_BLOCKED:", "            d->stats.ctx_switches++;", "            break;", "        case EXEC_FAULT:", "            fault_channel(d, c, why);", "            break;", "        }", "    }", "    pthread_mutex_unlock(&d->lock);", "    return NULL;", "}"]}, "check_acquire_timeouts": {"start": 423, "lines": ["/* Lock held. Fault channels parked on an ACQUIRE that is still unmet after", " * the acquire timeout. A parked channel is off the engine, so it can be torn", " * down right here; the active one is skipped (the hang check covers it). */", "static void check_acquire_timeouts(gpu_dev_t *d)", "{", "    if (d->acquire_timeout_ms == 0)", "        return;", "    uint64_t now = now_ms();", "    for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++) {", "        channel_t *c = &d->ch[i];", "        if (!atomic_load(&c->open) || atomic_load(&c->status) != GPU_CH_OK ||", "            !c->waiting || d->active == c)", "            continue;", "        if (sem_reached(d->sem[c->wait_sem], c->wait_val))", "            continue;                   /* satisfied, just not rescheduled */", "        if (now - c->wait_since_ms >= d->acquire_timeout_ms) {", "            d->stats.acquire_timeouts++;", "            fault_channel(d, c, GPU_CH_FAULT_ACQUIRE_TIMEOUT);", "        }", "    }", "}"]}, "watchdog_main": {"start": 445, "lines": ["static void *watchdog_main(void *arg)", "{", "    gpu_dev_t *d = arg;", "", "    pthread_mutex_lock(&d->lock);", "    while (d->running) {", "        struct timespec ts = deadline_after(watchdog_period(d));", "        pthread_cond_timedwait(&d->wd_cv, &d->lock, &ts);", "", "        check_acquire_timeouts(d);", "", "        channel_t *c = d->active;", "        if (c != NULL && !c->reset_req &&", "            now_ms() - d->active_since_ms >= d->watchdog_ms) {", "            c->reset_req = true;", "            atomic_store(&c->status, GPU_CH_FAULT_TIMEOUT);  /* submit now -EIO */", "            d->stats.watchdog_resets++;", "            pthread_cond_broadcast(&d->wd_cv);      /* kick the engine     */", "        }", "    }", "    pthread_mutex_unlock(&d->lock);", "    return NULL;", "}"]}, "gpu_channel_recover": {"start": 663, "lines": ["int gpu_channel_recover(gpu_dev_t *d, unsigned ch)", "{", "    if (ch >= GPU_MAX_CHANNELS)", "        return -EINVAL;", "    channel_t *c = &d->ch[ch];", "    /* Lock order: submit_lock, then device lock (same as gpu_submit). Holding", "     * submit_lock freezes GP_PUT while the ring is emptied. */", "    pthread_mutex_lock(&c->submit_lock);", "    pthread_mutex_lock(&d->lock);", "    int rc = 0;", "    if (!atomic_load(&c->open))", "        rc = -EINVAL;", "    else if (d->active == c)", "        rc = -EBUSY;                                /* still being torn down */", "    else {", "        /* Off the engine and faulted, so the engine will not touch the ring:", "         * discard everything up to GP_PUT, including dead entries published", "         * after the fault, then reopen the channel. */", "        atomic_store_explicit(&c->gp_get,", "                              atomic_load_explicit(&c->gp_put, memory_order_relaxed),", "                              memory_order_release);", "        c->cursor    = 0;", "        c->waiting   = false;", "        c->reset_req = false;", "        atomic_store(&c->status, GPU_CH_OK);", "    }", "    pthread_mutex_unlock(&d->lock);", "    pthread_mutex_unlock(&c->submit_lock);", "    return rc;", "}"]}};
+  const FN_ORDER = ['gpu_submit', 'ring_doorbell', 'pick_runnable', 'exec_entry', 'engine_main', 'fault_channel', 'check_acquire_timeouts', 'watchdog_main', 'gpu_channel_recover'];
+  const nm = e => NAMES[e.i];
+  const HIT = {
+    submit: { fn: 'gpu_submit', subs: ['memcpy(slot->w', 'atomic_store_explicit(&c->gp_put, put + 1u', 'ring_doorbell(d);'], p: 1, why: e => nm(e) + ' submitted a batch. The segment is copied into its slot, then GP_PUT is published with a release store, then the doorbell rings.' },
+    eagain: { fn: 'gpu_submit', subs: ['rc = -EAGAIN;'], p: 2, why: e => nm(e) + "'s ring is full (put - get >= 16), so gpu_submit refuses with -EAGAIN. This is back-pressure." },
+    eio: { fn: 'gpu_submit', subs: ['rc = -EIO;'], p: 2, why: e => nm(e) + ' is faulted, so gpu_submit refuses new work with -EIO.' },
+    pick: { fn: 'pick_runnable', subs: ['atomic_load_explicit(&c->gp_put, memory_order_acquire)', 'c->waiting = false;'], p: 1, why: e => 'The engine scans channels round-robin. It acquire-loads GP_PUT, sees work, and picks ' + nm(e) + '.' },
+    resume: { fn: 'pick_runnable', subs: ['if (c->waiting && !sem_reached', 'c->waiting = false;'], p: 2, why: e => nm(e) + ' was parked. Its semaphore has now been reached, so pick_runnable lets it run again from its saved cursor.' },
+    rel: { fn: 'exec_entry', subs: ['d->sem[a[0]] = a[1];', 'pthread_cond_broadcast(&d->sem_cv);'], p: 2, why: e => nm(e) + ' ran SEM_RELEASE: it writes the semaphore under the device lock and wakes any host waiters.' },
+    park: { fn: 'exec_entry', subs: ['c->waiting  = true;', 'c->wait_sem = a[0];'], p: 2, why: e => nm(e) + ' hit a SEM_ACQUIRE that is not met. It sets waiting = true, keeps its cursor and gives the engine back (a context switch).' },
+    hang: { fn: 'exec_entry', subs: ['pthread_cond_timedwait(&d->wd_cv, &d->lock, &ts);'], p: 2, why: e => nm(e) + ' entered HANG. It spins here, like a stuck shader, until the watchdog sets reset_req.' },
+    retire: { fn: 'engine_main', subs: ['atomic_store_explicit(&c->gp_get, get + 1u, memory_order_release);', 'd->stats.entries_done++;'], p: 1, why: e => nm(e) + ' finished an entry. The engine release-stores GP_GET + 1, which hands the slot back to the host.' },
+    wd: { fn: 'watchdog_main', subs: ['c->reset_req = true;', 'atomic_store(&c->status, GPU_CH_FAULT_TIMEOUT);'], p: 2, why: e => 'The watchdog saw ' + nm(e) + ' hold the engine too long. It sets reset_req and marks the channel faulted so new submits fail.' },
+    acqto: { fn: 'check_acquire_timeouts', subs: ['fault_channel(d, c, GPU_CH_FAULT_ACQUIRE_TIMEOUT);', 'd->stats.acquire_timeouts++;'], p: 2, why: e => 'The watchdog found ' + nm(e) + ' still parked after the acquire timeout and faulted it.' },
+    invalid: { fn: 'exec_entry', subs: ['bad_method:'], extra: 1, p: 2, why: e => nm(e) + ' sent an invalid method. exec_entry jumps to bad_method and reports FAULT_INVALID_METHOD; only this channel is torn down.' },
+    recover: { fn: 'gpu_channel_recover', subs: ['atomic_store(&c->status, GPU_CH_OK);'], p: 2, why: e => nm(e) + ' was recovered. Under submit_lock and the device lock, GP_GET jumps to GP_PUT and the status returns to OK.' }
+  };
+  const esc = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  function hlCode(line) {
+    const trimmed = line.trim();
+    let ci = /^(\*|\/\*|\/\/)/.test(trimmed) ? 0 : line.search(/\/\*|\/\//);
+    const code = ci < 0 ? line : line.slice(0, ci), com = ci < 0 ? '' : line.slice(ci);
+    let h = esc(code)
+      .replace(/\b(memory_order_\w+)\b/g, '<span class="m">$1</span>')
+      .replace(/\b(atomic_\w+|_Atomic)\b/g, '<span class="a">$1</span>')
+      .replace(/\b(static|int|void|if|else|for|while|return|break|case|switch|goto|const|default|bool|true|false)\b/g, '<span class="k">$1</span>');
+    if (com) h += '<span class="c">' + esc(com) + '</span>';
+    const mo = /memory_order_release/.test(line) ? ['rel', 'release'] : /memory_order_acquire/.test(line) ? ['acq', 'acquire'] : /memory_order_relaxed/.test(line) ? ['rlx', 'relaxed'] : null;
+    if (mo) h += '<b class="mo ' + mo[0] + '">' + mo[1] + '</b>';
+    return h;
+  }
+  const codeView = $('codeView'), chipsEl = $('fnChips'), codeWhat = $('codeWhat');
+  const fnBtns = {};
+  FN_ORDER.forEach(f => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = f + '()'; b.setAttribute('aria-pressed', 'false');
+    b.addEventListener('click', () => { $('codeFollow').checked = false; codeBuild(f); }); chipsEl.appendChild(b); fnBtns[f] = b;
+  });
+  let codeFn = '', codeLines = [], codeState = null, codeTimer = 0;
+  function codeBuild(fn) {
+    codeFn = fn; const d = CODE[fn];
+    codeView.innerHTML = d.lines.map((l, k) => '<div class="ln"><span class="n">' + (d.start + k) + '</span><span class="t">' + hlCode(l) + '</span></div>').join('');
+    codeLines = [...codeView.children];
+    Object.keys(fnBtns).forEach(k => fnBtns[k].setAttribute('aria-pressed', String(k === fn)));
+    codeView.scrollTop = 0;
+  }
+  function codeApply(force) {
+    if (curTab !== 'code') return;
+    if (!codeFn) codeBuild(codeState ? codeState.fn : 'gpu_submit');
+    const st = codeState;
+    if (!st) return;
+    if (codeFn !== st.fn && $('codeFollow').checked) codeBuild(st.fn);
+    codeWhat.querySelector('span').textContent = st.text;
+    codeLines.forEach(l => l.classList.remove('hot', 'fresh'));
+    if (codeFn === st.fn) {
+      const d = CODE[st.fn]; let first = null;
+      st.subs.forEach((s, si) => {
+        d.lines.forEach((l, k) => { if (l.indexOf(s) >= 0) { codeLines[k].classList.add('hot'); if (force !== true) codeLines[k].classList.add('fresh'); if (!first) first = codeLines[k]; if (si === 0 && st.extra && codeLines[k + 1]) codeLines[k + 1].classList.add('hot'); } });
+      });
+      if (first) codeView.scrollTop = Math.max(0, first.offsetTop - codeView.clientHeight / 3);
+    }
+    clearTimeout(codeTimer); codeTimer = setTimeout(() => codeLines.forEach(l => l.classList.remove('hot', 'fresh')), 2200);
+  }
+  function codeHook(e) {
+    if (!$('codeFollow').checked) return;
+    let key = e.t;
+    if (e.t === 'fault') { if (e.why !== 'INVALID_METHOD') return; key = 'invalid'; }
+    const h = HIT[key]; if (!h) return;
+    const now = performance.now();
+    if (codeState && h.p < codeState.p && now - codeState.t < 1400) return;
+    codeState = { fn: h.fn, subs: h.subs, extra: h.extra, p: h.p, t: now, text: h.why(e) };
+    codeApply();
+  }
+
+  /* ------------------------------------------------------------ memory ordering lesson */
+  const ORD = {
+    mode: 'safe', step: 0, timer: 0,
+    H1: 'slot->w[0..3] = batch;', E2: 'read slot->w[0..3];',
+    safe: {
+      h2: 'atomic_store_explicit(&c->gp_put, 4, memory_order_release);', e1: 'put = atomic_load_explicit(&c->gp_put, memory_order_acquire);', tag: ['RELEASE', 'rel'],
+      steps: [
+        { cells: ['', '', '', ''], put: 3, hl: [], msg: 'Slot 3 is free. The host wants to hand the engine a new 4-word batch. GP_PUT is 3, so the engine thinks there is nothing new.' },
+        { cells: ['A', 'B', 'C', 'D'], put: 3, hl: ['h1'], msg: 'Step 1. The host writes the four words into slot 3. The engine still sees GP_PUT = 3, so it has no reason to look at the slot yet.' },
+        { cells: ['A', 'B', 'C', 'D'], put: 4, hl: ['h2'], tag: true, msg: 'Step 2. The host release-stores GP_PUT = 4. Release guarantees that all the writes above become visible no later than this store.' },
+        { cells: ['A', 'B', 'C', 'D'], put: 4, hl: ['e1'], tag: true, msg: 'Step 3. The engine acquire-loads GP_PUT and sees 4. Acquire guarantees that everything the host wrote before that release is visible to the engine now.' },
+        { cells: ['A', 'B', 'C', 'D'], put: 4, hl: ['e2'], tag: true, read: ['A', 'B', 'C', 'D'], verdict: ['ok', 'Complete batch. Safe to execute.'], msg: 'Step 4. The engine reads slot 3 and gets the whole batch. This guarantee is what the C code relies on.' }
+      ]
+    },
+    bad: {
+      h2: 'atomic_store_explicit(&c->gp_put, 4, memory_order_relaxed);', e1: 'put = atomic_load_explicit(&c->gp_put, memory_order_relaxed);', tag: ['RELAXED', 'rlx'],
+      steps: [
+        { cells: ['', '', '', ''], put: 3, hl: [], msg: 'Same start: slot 3 is free and GP_PUT is 3.' },
+        { cells: ['?', '?', '?', '?'], pending: true, put: 3, hl: ['h1'], msg: 'Step 1. The host issues the four writes. On a weakly ordered CPU (like ARM), or after the compiler reorders them, they can still be sitting in a store buffer, not yet visible to other cores.' },
+        { cells: ['?', '?', '?', '?'], pending: true, put: 4, hl: ['h2'], tag: true, msg: 'Step 2. The host stores GP_PUT = 4 with no ordering. Nothing stops this store from becoming visible BEFORE the data it announces.' },
+        { cells: ['?', '?', '?', '?'], pending: true, put: 4, hl: ['e1'], tag: true, msg: 'Step 3. The engine loads GP_PUT and sees 4: "new work is ready".' },
+        { cells: ['A', '?', '?', '?'], pending: true, put: 4, hl: ['e2'], tag: true, read: ['A', '?', '?', '?'], verdict: ['bad', 'Torn read: half-written batch. The engine would execute a corrupt command.'], msg: 'Step 4. The engine reads the slot and finds only part of the batch. It sees the first word and then stale garbage.' },
+        { cells: ['A', 'B', 'C', 'D'], put: 4, hl: [], tag: true, read: ['A', '?', '?', '?'], verdict: ['bad', 'Too late: the engine already read it.'], msg: 'Step 5. The data finally lands, but the engine has already used the half-written version. Bugs like this are rare, hard to reproduce, and show up under load or on some CPUs.' }
+      ]
+    }
+  };
+  const ordCells = $('ordCells'), ordRead = $('ordRead');
+  for (let k = 0; k < 4; k++) { ordCells.appendChild(document.createElement('div')).className = 'cell'; ordRead.appendChild(document.createElement('div')).className = 'cell'; }
+  function ordRender() {
+    const m = ORD[ORD.mode], st = m.steps[Math.min(ORD.step, m.steps.length - 1)];
+    $('oc-h1').textContent = ORD.H1; $('oc-h2').textContent = m.h2; $('oc-e1').textContent = m.e1; $('oc-e2').textContent = ORD.E2;
+    ['h1', 'h2', 'e1', 'e2'].forEach(k => $('oc-' + k).classList.toggle('on', st.hl.indexOf(k) >= 0));
+    [...ordCells.children].forEach((c, k) => {
+      c.textContent = st.cells[k] || '';
+      c.className = 'cell' + (st.cells[k] ? (st.pending ? ' pending' : ' full') : '');
+    });
+    [...ordRead.children].forEach((c, k) => { const v = st.read ? st.read[k] : ''; c.textContent = v; c.className = 'cell' + (v ? (v === '?' ? ' pending' : ' full') : ''); });
+    $('ordPut').textContent = st.put;
+    const tg = $('ordTag'); tg.textContent = st.tag ? m.tag[0] : ''; tg.className = 'tag' + (st.tag ? ' ' + m.tag[1] : '');
+    const v = $('ordVerdict'); v.className = 'verdict' + (st.verdict ? ' ' + st.verdict[0] : ''); v.textContent = st.verdict ? st.verdict[1] : '';
+    $('ordMsg').textContent = st.msg;
+    $('ordStep').textContent = 'step ' + Math.min(ORD.step, m.steps.length - 1) + ' / ' + (m.steps.length - 1);
+    $('ordBack').disabled = ORD.step === 0;
+    $('ordNext').disabled = ORD.step >= m.steps.length - 1;
+  }
+  function ordGo(n) { ORD.step = Math.max(0, Math.min(ORD[ORD.mode].steps.length - 1, n)); ordRender(); }
+  function ordStopAuto() { clearInterval(ORD.timer); ORD.timer = 0; $('ordAuto').textContent = 'Auto-play'; }
+  $('ordNext').addEventListener('click', () => { ordStopAuto(); ordGo(ORD.step + 1); });
+  $('ordBack').addEventListener('click', () => { ordStopAuto(); ordGo(ORD.step - 1); });
+  $('ordAuto').addEventListener('click', () => {
+    if (ORD.timer) { ordStopAuto(); return; }
+    if (ORD.step >= ORD[ORD.mode].steps.length - 1) ordGo(0);
+    $('ordAuto').textContent = 'Stop';
+    ORD.timer = setInterval(() => { if (ORD.step >= ORD[ORD.mode].steps.length - 1) { ordStopAuto(); return; } ordGo(ORD.step + 1); }, 2600);
+  });
+  $('ordMode').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    ordStopAuto(); ORD.mode = b.dataset.m; ORD.step = 0;
+    $('ordMode').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+    ordRender();
+  });
+
+  /* ------------------------------------------------------------ benchmark */
+  const BENCH = {"configs": [{"name": "1 host thread, 1 channel", "old": {"tput": 1066532.0, "submit": 727.5}, "new": {"tput": 894169.5, "submit": 939.0}, "exp": {"tput": 932849.0, "submit": 870.0}}, {"name": "4 host threads, 4 channels (one each)", "old": {"tput": 497367.5, "submit": 3980.0}, "new": {"tput": 770233.0, "submit": 2543.5}, "exp": {"tput": 613338.0, "submit": 3024.0}}, {"name": "4 host threads, 1 shared channel", "old": {"tput": 275549.5, "submit": 4246.0}, "new": {"tput": 116728.0, "submit": 23699.0}, "exp": {"tput": 598994.5, "submit": 3915.5}}], "clock": 21, "env": "Container with 4 vCPUs (Intel Xeon @ 2.80 GHz), Linux 6.18, gcc 13.3 with -O2.", "src": "/* Benchmark for gpu_sim: host-side submit cost and end-to-end throughput.\n * Build against either source tree: gcc -std=c11 -O2 -Iinclude src/gpu_sim.c ../bench.c -lpthread */\n#define _POSIX_C_SOURCE 200809L\n#include <errno.h>\n#include <pthread.h>\n#include <sched.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <time.h>\n#include \"gpu_sim.h\"\n\nstatic uint64_t ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }\ntypedef struct { gpu_dev_t *g; unsigned ch; int iters; uint64_t sub_ns, ok, eagain; int err; } arg_t;\n\nstatic void *worker(void *p)\n{\n    arg_t *a = p; gpu_pb_t pb; pb_reset(&pb); pb_nop(&pb);\n    for (int i = 0; i < a->iters;) {\n        uint64_t t0 = ns(); int rc = gpu_submit(a->g, a->ch, &pb); uint64_t t1 = ns();\n        if (rc == 0) { a->sub_ns += t1 - t0; a->ok++; i++; }\n        else if (rc == -EAGAIN) { a->eagain++; sched_yield(); }\n        else { a->err = rc; return NULL; }\n    }\n    return NULL;\n}\nstatic int cmp(const void *a, const void *b) { double x = *(const double *)a, y = *(const double *)b; return (x > y) - (x < y); }\n\n/* returns entries/s and mean ns per successful gpu_submit */\nstatic int run(int threads, int shared, int iters, double *tput, double *sub_ns, double clk)\n{\n    gpu_dev_t *g = gpu_create(4096, 60000);\n    int nch = shared ? 1 : threads; unsigned ch[8];\n    for (int i = 0; i < nch; i++) gpu_channel_open(g, &ch[i]);\n    pthread_t t[8]; arg_t a[8]; memset(a, 0, sizeof a);\n    uint64_t t0 = ns();\n    for (int i = 0; i < threads; i++) { a[i] = (arg_t){ g, ch[shared ? 0 : i], iters, 0, 0, 0, 0 }; pthread_create(&t[i], NULL, worker, &a[i]); }\n    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);\n    for (int i = 0; i < nch; i++) if (gpu_channel_idle_wait(g, ch[i], 60000) != 0) { gpu_destroy(g); return -1; }\n    uint64_t t1 = ns();\n    uint64_t sum = 0, ok = 0;\n    for (int i = 0; i < threads; i++) { if (a[i].err) { gpu_destroy(g); return -2; } sum += a[i].sub_ns; ok += a[i].ok; }\n    gpu_stats_t s; gpu_get_stats(g, &s);\n    if (s.entries_done != (uint64_t)threads * (uint64_t)iters || s.faults != 0) { gpu_destroy(g); return -3; }\n    gpu_destroy(g);\n    *tput = (double)ok / ((double)(t1 - t0) / 1e9);\n    *sub_ns = (double)sum / (double)ok - clk;\n    return 0;\n}\n\nint main(int argc, char **argv)\n{\n    int runs = argc > 1 ? atoi(argv[1]) : 7, iters = argc > 2 ? atoi(argv[2]) : 100000;\n    uint64_t c0 = ns(); for (int i = 0; i < 1000000; i++) (void)ns(); double clk = (double)(ns() - c0) / 1e6;\n    struct { const char *name; int threads, shared; } cfg[] = {\n        { \"1 host thread, 1 channel\", 1, 0 }, { \"4 host threads, 4 channels (one each)\", 4, 0 }, { \"4 host threads, 1 shared channel\", 4, 1 } };\n    printf(\"{\\\"clock_overhead_ns\\\":%.1f,\\\"runs\\\":%d,\\\"iters_per_thread\\\":%d,\\\"configs\\\":[\", clk, runs, iters);\n    for (int c = 0; c < 3; c++) {\n        double tp[32], sn[32];\n        for (int r = 0; r < runs; r++) { int rc = run(cfg[c].threads, cfg[c].shared, iters, &tp[r], &sn[r], clk); if (rc) { fprintf(stderr, \"run failed %d\\n\", rc); return 1; } }\n        qsort(tp, (size_t)runs, sizeof *tp, cmp); qsort(sn, (size_t)runs, sizeof *sn, cmp);\n        printf(\"%s{\\\"name\\\":\\\"%s\\\",\\\"tput_median\\\":%.0f,\\\"tput_min\\\":%.0f,\\\"tput_max\\\":%.0f,\\\"submit_ns_median\\\":%.0f,\\\"submit_ns_min\\\":%.0f,\\\"submit_ns_max\\\":%.0f}\",\n               c ? \",\" : \"\", cfg[c].name, tp[runs / 2], tp[0], tp[runs - 1], sn[runs / 2], sn[0], sn[runs - 1]);\n    }\n    printf(\"]}\\n\");\n    return 0;\n}\n", "diff": "--- a/src/gpu_sim.c  (current)\n+++ b/src/gpu_sim.c  (experiment, not committed)\n@@ gpu_submit\n-    int rc = 0;\n+    int rc = 0, ring = 0;\n@@\n         atomic_store_explicit(&c->gp_put, put + 1u, memory_order_release);\n-        ring_doorbell(d);\n+        ring = 1;\n     }\n     pthread_mutex_unlock(&c->submit_lock);\n+    if (ring)\n+        ring_doorbell(d);     /* doorbell outside submit_lock */\n     return rc;"};
+  const fmtN = n => n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n));
+  const fmtNs = n => n >= 1000 ? (n / 1000).toFixed(1) + ' µs' : Math.round(n) + ' ns';
+  let benchDone = false;
+  function benchRender() {
+    if (benchDone) return; benchDone = true;
+    const V = [['old', 'Earlier: device mutex'], ['new', 'Current: atomic ring'], ['exp', 'Experiment*']];
+    const bar = (cls, label, val, max, txt) => '<div class="brow"><span>' + label + '</span><div class="bar ' + cls + '"><i style="width:' + Math.max(2, val / max * 100).toFixed(1) + '%"></i></div><span class="v">' + txt + '</span></div>';
+    let html = '';
+    const r = (a, b) => (a / b);
+    const C = BENCH.configs, c0 = C[0], c1 = C[1], c2 = C[2];
+    const fx = x => (x >= 10 ? x.toFixed(0) : x.toFixed(1)) + 'x';
+    const f = [];
+    f.push('<b>One thread, one channel:</b> about the same. Both versions submit in roughly ' + fmtNs(Math.min(c0.old.submit, c0.new.submit)) + ' to ' + fmtNs(Math.max(c0.old.submit, c0.new.submit)) + ', inside the noise of this shared machine.');
+    f.push('<b>Each thread has its own channel:</b> the atomic ring is faster, about ' + fx(r(c1.old.submit, c1.new.submit)) + ' lower submit cost and ' + fx(r(c1.new.tput, c1.old.tput)) + ' the throughput, because host threads no longer fight over one device lock.');
+    f.push('<b>Four threads sharing one channel:</b> the atomic ring is <b>slower</b>, about ' + fx(r(c2.new.submit, c2.old.submit)) + ' higher submit cost and ' + fx(r(c2.old.tput, c2.new.tput)) + ' lower throughput. Cause: gpu_submit rings the doorbell while still holding submit_lock, and the doorbell needs the device lock that the engine keeps taking, so submitters queue up behind each other.');
+    f.push('<b>The fix (tested, not committed):</b> ring the doorbell after releasing submit_lock. That gave ' + fmtNs(c2.exp.submit) + ' per submit and ' + fmtN(c2.exp.tput) + ' entries/s on the shared channel, better than the mutex version.');
+    html += '<ul class="findings">' + f.map(x => '<li>' + x + '</li>').join('') + '</ul>';
+    C.forEach(c => {
+      const maxS = Math.max(c.old.submit, c.new.submit, c.exp.submit), maxT = Math.max(c.old.tput, c.new.tput, c.exp.tput);
+      html += '<div class="bgroup"><h4>' + c.name + '</h4><div class="bnote">Submit call cost (lower is better)</div>' +
+        V.map(([k, l]) => bar(k === 'old' ? 'old' : 'new', l, c[k].submit, maxS, fmtNs(c[k].submit))).join('') +
+        '<div class="bnote" style="margin-top:8px">Throughput, entries per second (higher is better)</div>' +
+        V.map(([k, l]) => bar(k === 'old' ? 'old' : 'new', l, c[k].tput, maxT, fmtN(c[k].tput))).join('') + '</div>';
+    });
+    html += '<div class="bmeta"><p>* Experiment: a scratch copy of the current code with <code>ring_doorbell()</code> moved after <code>pthread_mutex_unlock(&amp;c-&gt;submit_lock)</code>. It is not in the repository.</p>' +
+      '<p><b>How it was measured.</b> ' + BENCH.env + ' Each configuration ran 7 times with 100,000 NOP entries per thread; a value is the mean of the medians of two separate rounds. Per-call cost excludes the ~' + BENCH.clock + ' ns clock read. Entries are NOPs, so the engine thread, not the ring, limits throughput. This says nothing about real GPUs, and the machine is shared, so treat differences under about 20% as noise.</p>' +
+      '<details class="sm"><summary>Show the benchmark source (bench.c)</summary><pre>' + esc(BENCH.src) + '</pre></details>' +
+      '<details class="sm"><summary>Show the experimental change</summary><pre>' + esc(BENCH.diff) + '</pre></details></div>';
+    $('benchBody').innerHTML = html;
+  }
+
+  /* ------------------------------------------------------------ playground */
+  const pgList = [];
+  const PG_ARGS = { fill: [['dst', 0]], copy: [['dst', 4], ['src', 0]], rel: [['sem', 0], ['val', 1]], acq: [['sem', 0], ['val', 1]], nop: [], hang: [], bad: [] };
+  NAMES.forEach((n, i) => { const o = document.createElement('option'); o.value = i; o.textContent = n; $('pgCh').appendChild(o); });
+  function pgArgsRender() {
+    const op = $('pgOp').value, box = $('pgArgs'); box.innerHTML = '';
+    PG_ARGS[op].forEach(([label, def], k) => {
+      const l = document.createElement('label'); l.textContent = label;
+      const inp = document.createElement('input'); inp.type = 'number'; inp.min = 0; inp.max = 7; inp.value = def; inp.id = 'pgA' + k;
+      if (label === 'val') inp.max = 99;
+      l.appendChild(inp); box.appendChild(l);
+    });
+  }
+  function pgMake() {
+    const op = $('pgOp').value, g = k => Math.max(0, Math.min(99, parseInt(($('pgA' + k) || {}).value, 10) || 0)), c7 = k => Math.min(7, g(k));
+    if (op === 'fill') return M.fill(c7(0));
+    if (op === 'copy') return M.copy(c7(0), c7(1));
+    if (op === 'rel') return M.rel(c7(0), g(1));
+    if (op === 'acq') return M.acq(c7(0), g(1));
+    return M[op]();
+  }
+  function pgRenderChips() {
+    const box = $('pgChips'); box.innerHTML = '';
+    if (!pgList.length) { const s = document.createElement('span'); s.className = 'empty'; s.textContent = 'No methods yet. Add some, or load a preset.'; box.appendChild(s); return; }
+    pgList.forEach((m, k) => {
+      const c = document.createElement('span'); c.className = 'chip'; c.textContent = lbl(m);
+      const x = document.createElement('button'); x.type = 'button'; x.textContent = '×'; x.setAttribute('aria-label', 'Remove ' + lbl(m));
+      x.addEventListener('click', () => { pgList.splice(k, 1); pgRenderChips(); }); c.appendChild(x); box.appendChild(c);
+    });
+  }
+  function pgMsg(t, cls) { const m = $('pgMsg'); m.textContent = t; m.className = 'pgmsg ' + (cls || ''); }
+  $('pgOp').addEventListener('change', pgArgsRender);
+  $('pgAdd').addEventListener('click', () => { if (pgList.length >= 24) { pgMsg('A pushbuffer holds at most 24 methods here.', 'err'); return; } pgList.push(pgMake()); pgRenderChips(); pgMsg(''); });
+  $('pgClear').addEventListener('click', () => { pgList.length = 0; pgRenderChips(); pgMsg(''); });
+  $('pgSubmit').addEventListener('click', () => {
+    if (!pgList.length) { pgMsg('Add at least one method first.', 'err'); return; }
+    const ci = +$('pgCh').value, rc = submit(ci, pgList.map(m => Object.assign({}, m)));
+    if (rc === 0) { pgMsg('Submitted to ' + NAMES[ci] + '. Running.', 'ok'); setPlaying(true); }
+    else if (rc === -11) pgMsg(NAMES[ci] + "'s ring is full (EAGAIN). Let it drain, or free the semaphore it waits on.", 'err');
+    else pgMsg(NAMES[ci] + ' is faulted (EIO). Recover it first, from the Control tab or with the green pad.', 'err');
+  });
+  const PRESETS = [
+    ['Hand-off between two channels', () => { submit(3, [M.acq(0, 1), M.copy(4, 0), M.rel(1, 1)]); submit(2, [M.fill(0), M.rel(0, 1)]); }],
+    ['Deadlock: two channels wait on each other', () => { submit(0, [M.acq(2, 1), M.rel(3, 1)]); submit(3, [M.acq(3, 1), M.rel(2, 1)]); }],
+    ['Break the engine', () => { submit(1, [M.hang()]); submit(0, [M.fill(1), M.rel(5, 1)]); }]
+  ];
+  PRESETS.forEach(([label, fn]) => {
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+    b.addEventListener('click', () => { if (typeof exitTour === 'function') exitTour(true); load('play'); fn(); setPlaying(true); pgMsg('Preset running. Watch the lanes and the Engine timeline.', 'ok'); });
+    $('pgPresets').appendChild(b);
+  });
+  TS.play = { text: '', setup() {} };
+  pgArgsRender(); pgRenderChips();
+
+  /* ------------------------------------------------------------ interview mode */
+  $('pitchText').textContent = 'I built gpu-channel-sim, a C11 and pthreads model of how a GPU takes work from many clients. Each client has a channel with a ring of 16 pushbuffer segments, the same GP_PUT and GP_GET idea as real hardware. One engine thread runs one entry per timeslice, round-robin, and parks a channel that is waiting on a semaphore instead of blocking everyone. A watchdog thread cuts off a channel that holds the engine too long, a fault only affects that channel, and the channel can be recovered. The ring is single-producer single-consumer with C11 release and acquire ordering, so the host and the engine never wait on each other to move work. I tested it with 93 checks under ASan, UBSan and ThreadSanitizer, with CI on Linux and macOS. I also benchmarked it honestly: it is faster when each thread has its own channel, but slower when several threads share one, and I traced that to ringing the doorbell while holding the submit lock.';
+  const QA = [
+    ['Walk me through one submit, start to finish.', ['gpu_submit takes the channel\'s submit_lock, so many host threads act as one producer. It reads GP_PUT (relaxed, because only this thread writes it) and GP_GET (acquire: if a slot looks free, the engine really is done with it). A faulted channel returns -EIO; put - get >= 16 returns -EAGAIN.', 'Otherwise it copies the segment into fifo[put & 15], release-stores GP_PUT + 1, and rings the doorbell. On the engine side, pick_runnable acquire-loads GP_PUT, so the segment bytes are visible before they are executed.'], ['atomics', 'gpu_submit']],
+    ['Why release/acquire, and not seq_cst or just a mutex?', ['The protocol needs only two happens-before edges: the segment data before GP_PUT (host to engine), and the engine\'s reads before GP_GET (engine to host). Release and acquire give exactly those, without the full barriers seq_cst adds, which matters on weakly ordered CPUs such as ARM.', 'A mutex would also be correct, and the earlier version used one. The point of the atomic ring is to take the device lock out of moving work.'], ['atomics', 'ARM']],
+    ['Is it really lock-free?', ['The ring protocol itself is: one writer per index, one atomic load and store per side. The whole submit path is not. A per-channel submit_lock serialises producers, and the doorbell takes the device mutex to avoid a lost wakeup.', 'My benchmark shows the cost: with four threads on one channel it was slower than the mutex version, because the doorbell was rung while holding submit_lock.'], ['honesty', 'benchmark']],
+    ['What about the ABA problem?', ['There is no compare-and-swap on the ring indices. Each index has exactly one writer, and both are free-running uint32_t counters (slot = index & 15), so a value never means two things at once. The host reuses a slot only after an acquire-load of GP_GET shows the engine has released it.', 'The compare-exchange in fault_channel is a different thing: a one-shot status change from OK to a fault code.'], ['atomics']],
+    ['What if a channel faults while another thread is submitting?', ['Entries published after the fault are dead. The engine skips channels that are not OK, idle_wait treats a faulted channel as idle once it is off the engine, and gpu_channel_recover takes submit_lock (freezing GP_PUT), then the device lock, sets GP_GET to GP_PUT and returns the status to OK.', 'Lock order is always submit_lock first, then the device lock, in both gpu_submit and gpu_channel_recover.'], ['faults', 'locking']],
+    ['Why does the doorbell take the device lock?', ['The engine checks GP_PUT and then sleeps on a condition variable while holding the device lock. If the host signalled without the lock, the signal could land between that check and the sleep and be lost.', 'Taking the lock briefly closes the window. Real hardware does not have this problem, because a register write wakes the engine.'], ['locking']],
+    ['The watchdog cannot tell a slow job from a hung one. How do you deal with that?', ['It cannot, so the timeout is a parameter (gpu_create takes watchdog_ms). Real drivers make the same trade-off.', 'The acquire timeout has the same issue for a slow producer, which is why it is off by default and opt-in through gpu_set_acquire_timeout.'], ['faults']],
+    ['How is this different from real NVIDIA hardware?', ['A real GPFIFO entry is a GPU virtual address plus a length that points at a pushbuffer; here an entry is a copy of the segment. Real method headers carry subchannel, method address, count and increment mode; here a header is just an opcode and an argument count.', 'There are also no runlists or TSGs, no priorities, no preemption inside a method, and no virtual memory or page faults. The README lists these as limitations.'], ['scope']],
+    ['How did you test the concurrency?', ['93 checks in 11 tests, run under gcc and clang, ASan/UBSan and ThreadSanitizer, with repeated TSan runs and 8 concurrent instances under CPU contention. CI builds on Linux and macOS.', 'One test has four host threads submitting 300 entries each to a single channel and checks that nothing is lost or torn. An early stress test failed because it mixed up "fence fired" with "entry retired"; that is written up in the README.'], ['testing']],
+    ['What would you change next?', ['First, ring the doorbell after releasing submit_lock. In my scratch experiment that took the shared-channel case from about 23 µs to about 4 µs per submit.', 'Second, GP_PUT and GP_GET sit next to each other in channel_t, so they likely share a cache line; padding them is worth measuring. Third, wake the engine without the device lock, for example with an atomic flag, so the lock is needed only when it is actually asleep.'], ['next steps', 'benchmark']]
+  ];
+  QA.forEach(([q, ans, tags]) => {
+    const d = document.createElement('details'); const s = document.createElement('summary'); s.textContent = q; d.appendChild(s);
+    ans.forEach(a => { const p = document.createElement('p'); p.textContent = a; d.appendChild(p); });
+    const tr = document.createElement('div'); tr.className = 'tagrow'; tags.forEach(t => { const x = document.createElement('span'); x.className = 'tg'; x.textContent = t; tr.appendChild(x); }); d.appendChild(tr);
+    $('qaList').appendChild(d);
+  });
+
+  /* ------------------------------------------------------------ quiz */
+  const QUIZ = [
+    ['Which store hands a ring slot back to the host once the engine has finished it?', ['A relaxed store to GP_PUT', 'A release store of GP_GET + 1', 'Unlocking the device mutex', 'Copying the segment again'], 1, 'The engine release-stores GP_GET + 1. Release guarantees that all of its reads of the slot happen before the host can see the slot as free and overwrite it.'],
+    ['A channel waits on a semaphore that its producer will never release, and the acquire timeout is off. What happens?', ['The watchdog faults it after 400 ms', 'It waits parked forever (without blocking others)', 'The engine skips it silently', 'The whole engine hangs'], 1, 'A parked channel does not block the engine, but without the opt-in acquire timeout it never finishes. The hang watchdog only watches the channel that is on the engine.'],
+    ['One channel sends an unknown opcode. What happens to the other channels?', ['They all fault too', 'Only that channel faults and its queue is dropped', 'The engine restarts', 'They slow down until it is fixed'], 1, 'Fault isolation: only the offending channel is marked faulted and loses its pending work. The others carry on.'],
+    ['All 16 slots of a channel are used. What does gpu_submit return?', ['0', '-EIO', '-EAGAIN', '-ENOSPC'], 2, '-EAGAIN means "try again later": back-pressure. -EIO is for a faulted channel, and -ENOSPC comes from gpu_channel_open when there are no free channels.'],
+    ['Why does ring_doorbell take the device lock?', ['To protect the ring contents', 'To avoid a lost wakeup of the engine\'s condition-variable sleep', 'Because atomics need a lock', 'To order GP_PUT after the data'], 1, 'The engine checks GP_PUT and then sleeps under the device lock. Signalling under the same lock means the wakeup cannot fall between its check and its sleep.']
+  ];
+  let quizScore = 0, quizAnswered = 0;
+  function quizRender() {
+    const body = $('quizBody'); body.innerHTML = ''; quizScore = 0; quizAnswered = 0;
+    QUIZ.forEach(([q, opts, ans, exp], qi) => {
+      const box = document.createElement('div'); box.className = 'qq';
+      const h = document.createElement('h4'); h.textContent = (qi + 1) + '. ' + q; box.appendChild(h);
+      const ol = document.createElement('div'); ol.className = 'qopts';
+      const ex = document.createElement('p'); ex.className = 'qexp'; ex.textContent = exp;
+      opts.forEach((o, oi) => {
+        const b = document.createElement('button'); b.type = 'button'; b.textContent = o;
+        b.addEventListener('click', () => {
+          if (box.dataset.done) return; box.dataset.done = '1';
+          [...ol.children].forEach((x, k) => { if (k === ans) x.classList.add('right'); else if (k === oi) x.classList.add('wrong'); x.disabled = true; });
+          if (oi === ans) quizScore++; quizAnswered++; ex.classList.add('show');
+          if (quizAnswered === QUIZ.length) {
+            const s = document.createElement('div'); s.className = 'qscore';
+            s.innerHTML = '<b>' + quizScore + ' / ' + QUIZ.length + '</b> ' + (quizScore === QUIZ.length ? 'Perfect. You can explain this project.' : quizScore >= 3 ? 'Good. Re-read the ones you missed in the tour.' : 'Take the tour once more, then try again.') + ' ';
+            const r = document.createElement('button'); r.type = 'button'; r.textContent = 'Try again'; r.addEventListener('click', quizRender); s.appendChild(r); body.appendChild(s);
+          }
+        });
+        ol.appendChild(b);
+      });
+      box.appendChild(ol); box.appendChild(ex); body.appendChild(box);
+    });
+  }
+  quizRender();
+
+  /* ------------------------------------------------------------ hash: apply */
+  function applyHash() {
+    const h = location.hash.slice(1); let m;
+    if ((m = /^scenario-(\d)$/.exec(h)) && SC[+m[1]]) { exitTour(true); load(+m[1]); }
+    else if ((m = /^tour-step-(\d+)$/.exec(h))) { const n = +m[1] - 1; if (n >= 0 && n < TOUR.length) { if (tourOn) showStep(n); else startTour(n); } }
+    else if (h === 'present') { if (!presenter) startPresenter(); }
+    else if ((m = /^tab-(\w+)$/.exec(h)) && tabBtns[m[1]]) setTab(m[1], true);
+  }
+  window.addEventListener('hashchange', () => { if (hashLock) { hashLock = false; return; } applyHash(); });
+
+  applyLang();
+  setTab('control', true, true);
+  { let seen = false; try { seen = localStorage.getItem('gcl-seen') === '1'; } catch (_) {}
+    if (!seen && !location.hash) { $('intro').hidden = false; setTimeout(() => { try { $('introTour').focus(); } catch (_) {} }, 50); } }
+  /* scenario buttons keep the address bar in sync */
+  elScen.addEventListener('click', e => { const b = e.target.closest('button[data-id]'); if (b) setHash('scenario-' + b.dataset.id); });
+
+
+  /* ------------------------------------------------------------- control */
+  function setPlaying(p) { playing = p; playBtn.innerHTML = p ? ICON_PAUSE : ICON_PLAY; }
+  function load(id) {
+    curScenario = id; S = newState();
+    acqOn = id === 4; acqChk.checked = acqOn;
+    const sc = SC[id] || TS[id];
+    sc.setup(); runScript();
+    elLog.innerHTML = ''; logShown = 0;
+    $('caption').textContent = sc.text;
+    elScen.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.id === id)));
+    setPlaying(false);
+    renderHud();
+  }
+  playBtn.addEventListener('click', () => setPlaying(!playing));
+  $('step').addEventListener('click', () => { setPlaying(false); for (let k = 0; k < 3; k++) stepSim(10); renderHud(); });
+  $('reset').addEventListener('click', () => load(curScenario));
+  speedSel.addEventListener('change', () => { speed = parseFloat(speedSel.value); });
+  acqChk.addEventListener('change', () => { acqOn = acqChk.checked; });
+  $('panelBtn').addEventListener('click', () => panel.classList.toggle('open'));
+  $('panelClose').addEventListener('click', () => panel.classList.remove('open'));
+
+  let last = performance.now(), stage = null;
+  function frame(t) {
+    const rd = Math.min(50, t - last); last = t;
+    if (playing) {
+      let sim = rd * SIM_PER_REAL * speed;
+      while (sim > 0) { const d = Math.min(10, sim); stepSim(d); sim -= d; }
+    }
+    renderHud();
+    const evs = S.events.splice(0);
+    evs.forEach(codeHook);
+    presenterTick(rd);
+    drawTimeline();
+    if (stage) stage.update(evs);
+    requestAnimationFrame(frame);
+  }
+  load(1);
+  stage = initStage();
+  requestAnimationFrame(frame);
+  applyHash();
+})();
+</script>
+
+</body>
+</html>
