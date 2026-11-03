@@ -40,7 +40,8 @@ typedef enum {
     GPU_CH_OK = 0,
     GPU_CH_FAULT_INVALID_METHOD,    /* unknown opcode or wrong arg count  */
     GPU_CH_FAULT_BAD_ADDRESS,       /* access outside VRAM / bad sem id   */
-    GPU_CH_FAULT_TIMEOUT            /* watchdog fired on this channel     */
+    GPU_CH_FAULT_TIMEOUT,           /* watchdog fired on this channel     */
+    GPU_CH_FAULT_ACQUIRE_TIMEOUT    /* parked on SEM_ACQUIRE too long     */
 } gpu_ch_status_t;
 
 /* ---------------------------------------------------------- pushbuffer */
@@ -68,11 +69,18 @@ typedef struct {
     uint64_t ctx_switches;      /* channel yielded on an unmet ACQUIRE    */
     uint64_t faults;            /* channels torn down (any reason)        */
     uint64_t watchdog_resets;   /* of which: hang detected by watchdog    */
+    uint64_t acquire_timeouts;  /* of which: SEM_ACQUIRE never satisfied  */
 } gpu_stats_t;
 
 /* Starts the engine and watchdog threads. NULL on failure. */
 gpu_dev_t *gpu_create(size_t vram_bytes, uint32_t watchdog_ms);
 void       gpu_destroy(gpu_dev_t *dev);
+
+/* Fault a channel that stays parked on an unmet SEM_ACQUIRE for longer than
+ * ms (GPU_CH_FAULT_ACQUIRE_TIMEOUT), e.g. because its producer channel was
+ * itself faulted and will never release. 0 disables it (the default), so a
+ * consumer may wait indefinitely for a slow but healthy producer. */
+void gpu_set_acquire_timeout(gpu_dev_t *dev, uint32_t ms);
 
 /* Returns 0 and the channel id, or -ENOSPC if all channels are in use. */
 int gpu_channel_open(gpu_dev_t *dev, unsigned *out_ch);

@@ -10,16 +10,35 @@
  *             timeout, it faults that channel; the engine aborts the entry,
  *             drops the channel's pending work and carries on with others.
  *
- * Locking: one device mutex guards all channel state and semaphores. VRAM is
- * touched without the lock; ordering comes from submit / semaphore release,
- * which both go through the mutex (a happens-before edge, as a real GPU uses
- * memory barriers before a semaphore release).
+ * GPFIFO ring (lock-free): each channel's ring is single-producer /
+ * single-consumer, like the real GP_PUT / GP_GET pair.
+ *
+ *   host    writes the segment into fifo[GP_PUT], then publishes it with a
+ *           RELEASE store of GP_PUT. The release guarantees the segment
+ *           bytes are visible before the new GP_PUT is (on hardware this is
+ *           the write barrier before the USERD GP_PUT / doorbell write).
+ *   engine  ACQUIRE-loads GP_PUT, so everything written before the publish
+ *           is visible, executes fifo[GP_GET], then RELEASE-stores GP_GET+1
+ *           to hand the slot back.
+ *   host    ACQUIRE-loads GP_GET before reusing a slot, so it never
+ *           overwrites a segment the engine is still reading.
+ *
+ * Several host threads may submit to one channel; a per-channel submit_lock
+ * serialises them into a single producer. The engine never takes it.
+ *
+ * Locking: the device mutex guards scheduler state (cursor, parking,
+ * active channel), semaphores and stats. It is NOT needed to move work
+ * through the ring. The doorbell still takes it briefly to wake the engine
+ * without a lost wakeup (the engine sleeps on a condvar, not on a register).
+ * VRAM is touched without any lock; ordering comes from GP_PUT publishing
+ * and from SEM_RELEASE, which goes through the mutex.
  */
 #define _POSIX_C_SOURCE 200809L
 #include "gpu_sim.h"
 
 #include <errno.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,16 +60,22 @@
 typedef enum { EXEC_DONE, EXEC_BLOCKED, EXEC_FAULT } exec_result_t;
 
 typedef struct {
-    bool            open;
-    gpu_ch_status_t status;
-    uint32_t        gp_put;         /* host-owned: next slot to fill        */
-    uint32_t        gp_get;         /* engine-owned: next slot to execute   */
-    gpu_pb_t        fifo[GPU_GPFIFO_ENTRIES];
+    /* Read lock-free by gpu_submit; written under the device lock. */
+    _Atomic bool     open;
+    _Atomic int      status;        /* gpu_ch_status_t                      */
 
+    /* Ring indices: free-running, slot = index & FIFO_MASK. */
+    _Atomic uint32_t gp_put;        /* host writes (release), engine reads  */
+    _Atomic uint32_t gp_get;        /* engine writes (release), host reads  */
+    pthread_mutex_t  submit_lock;   /* serialises host producers only       */
+    gpu_pb_t         fifo[GPU_GPFIFO_ENTRIES];
+
+    /* Scheduler state below: device lock, or engine-only while active. */
     uint32_t        cursor;         /* resume point inside current entry    */
     bool            waiting;        /* parked on an unmet ACQUIRE           */
     uint32_t        wait_sem;
     uint32_t        wait_val;
+    uint64_t        wait_since_ms;  /* when it parked (acquire timeout)     */
     bool            reset_req;      /* watchdog asked engine to abort       */
 } channel_t;
 
@@ -71,6 +96,7 @@ struct gpu_dev {
     channel_t      *active;         /* entry currently on the engine        */
     uint64_t        active_since_ms;
     uint32_t        watchdog_ms;
+    uint32_t        acquire_timeout_ms;     /* 0 = disabled                 */
 
     uint8_t        *vram;
     size_t          vram_size;
@@ -176,18 +202,32 @@ const char *gpu_ch_status_str(gpu_ch_status_t s)
     case GPU_CH_FAULT_INVALID_METHOD: return "FAULT_INVALID_METHOD";
     case GPU_CH_FAULT_BAD_ADDRESS:    return "FAULT_BAD_ADDRESS";
     case GPU_CH_FAULT_TIMEOUT:        return "FAULT_TIMEOUT";
+    case GPU_CH_FAULT_ACQUIRE_TIMEOUT: return "FAULT_ACQUIRE_TIMEOUT";
     }
     return "UNKNOWN";
 }
 
+/* Wake the engine after publishing GP_PUT. The engine checks GP_PUT and goes
+ * to sleep under the device lock, so taking it here means the signal cannot
+ * fall between its check and its sleep (no lost wakeup). This plays the role
+ * of the doorbell register write; no ring data is touched under the lock. */
+static void ring_doorbell(gpu_dev_t *d)
+{
+    pthread_mutex_lock(&d->lock);
+    pthread_cond_signal(&d->work_cv);
+    pthread_mutex_unlock(&d->lock);
+}
+
 /* ------------------------------------------------------------- engine */
 
-/* Execute the channel's current GPFIFO entry from ch->cursor.
- * Called WITHOUT the lock held. On EXEC_FAULT, *fault says why. */
-static exec_result_t exec_entry(gpu_dev_t *d, channel_t *c,
+/* Execute GPFIFO entry `get` of channel c from c->cursor.
+ * Called WITHOUT the device lock held. The caller ACQUIRE-loaded GP_PUT
+ * after the host published this slot, so its contents are visible here.
+ * On EXEC_FAULT, *fault says why. */
+static exec_result_t exec_entry(gpu_dev_t *d, channel_t *c, uint32_t get,
                                 gpu_ch_status_t *fault)
 {
-    const gpu_pb_t *pb = &c->fifo[c->gp_get & FIFO_MASK];
+    const gpu_pb_t *pb = &c->fifo[get & FIFO_MASK];
 
     while (c->cursor < pb->n) {
         uint32_t hdr   = pb->w[c->cursor];
@@ -236,6 +276,7 @@ static exec_result_t exec_entry(gpu_dev_t *d, channel_t *c,
                 c->waiting  = true;                 /* park; cursor kept  */
                 c->wait_sem = a[0];
                 c->wait_val = a[1];
+                c->wait_since_ms = now_ms();
             }
             pthread_mutex_unlock(&d->lock);
             if (!ready)
@@ -275,30 +316,42 @@ bad_addr:
     return EXEC_FAULT;
 }
 
-/* Lock held. Round-robin over channels that have work and can make progress. */
-static channel_t *pick_runnable(gpu_dev_t *d, unsigned *idx_out)
+/* Lock held. Round-robin over channels that have work and can make progress.
+ * Returns the channel and, in *get_out, the GPFIFO entry to execute. */
+static channel_t *pick_runnable(gpu_dev_t *d, unsigned *idx_out,
+                                uint32_t *get_out)
 {
     for (unsigned k = 0; k < GPU_MAX_CHANNELS; k++) {
         unsigned i = (d->rr_next + k) % GPU_MAX_CHANNELS;
         channel_t *c = &d->ch[i];
 
-        if (!c->open || c->status != GPU_CH_OK || c->gp_get == c->gp_put)
+        if (!atomic_load(&c->open) || atomic_load(&c->status) != GPU_CH_OK)
+            continue;
+        /* ACQUIRE pairs with the host's RELEASE publish in gpu_submit. */
+        uint32_t put = atomic_load_explicit(&c->gp_put, memory_order_acquire);
+        uint32_t get = atomic_load_explicit(&c->gp_get, memory_order_relaxed);
+        if (get == put)
             continue;
         if (c->waiting && !sem_reached(d->sem[c->wait_sem], c->wait_val))
             continue;
         c->waiting = false;
         *idx_out = i;
+        *get_out = get;
         return c;
     }
     return NULL;
 }
 
-/* Lock held. Drop all pending work and mark the channel faulted. */
+/* Lock held, channel not executing on the engine. Drop all pending work
+ * and mark the channel faulted. Entries the host publishes after this are
+ * dead too (status is no longer OK); gpu_channel_recover() discards them. */
 static void fault_channel(gpu_dev_t *d, channel_t *c, gpu_ch_status_t why)
 {
-    if (c->status == GPU_CH_OK)
-        c->status = why;
-    c->gp_get  = c->gp_put;
+    int ok = GPU_CH_OK;
+    atomic_compare_exchange_strong(&c->status, &ok, (int)why);
+    atomic_store_explicit(&c->gp_get,
+                          atomic_load_explicit(&c->gp_put, memory_order_acquire),
+                          memory_order_release);
     c->cursor  = 0;
     c->waiting = false;
     d->stats.faults++;
@@ -312,7 +365,8 @@ static void *engine_main(void *arg)
     pthread_mutex_lock(&d->lock);
     while (d->running) {
         unsigned idx;
-        channel_t *c = pick_runnable(d, &idx);
+        uint32_t get;
+        channel_t *c = pick_runnable(d, &idx, &get);
         if (c == NULL) {
             pthread_cond_wait(&d->work_cv, &d->lock);
             continue;
@@ -324,7 +378,7 @@ static void *engine_main(void *arg)
         pthread_mutex_unlock(&d->lock);
 
         gpu_ch_status_t why = GPU_CH_OK;
-        exec_result_t r = exec_entry(d, c, &why);
+        exec_result_t r = exec_entry(d, c, get, &why);
 
         pthread_mutex_lock(&d->lock);
         d->active = NULL;
@@ -337,7 +391,9 @@ static void *engine_main(void *arg)
         switch (r) {
         case EXEC_DONE:
             c->cursor = 0;
-            c->gp_get++;
+            /* RELEASE: all our reads of the slot happen before the host
+             * can see it free and overwrite it. */
+            atomic_store_explicit(&c->gp_get, get + 1u, memory_order_release);
             d->stats.entries_done++;
             pthread_cond_broadcast(&d->idle_cv);
             break;
@@ -354,21 +410,54 @@ static void *engine_main(void *arg)
 }
 
 /* ----------------------------------------------------------- watchdog */
+/* Lock held. Check every quarter of the shortest enabled timeout, so a
+ * timeout is detected within 1.25x its configured value. */
+static uint32_t watchdog_period(const gpu_dev_t *d)
+{
+    uint32_t t = d->watchdog_ms;
+    if (d->acquire_timeout_ms != 0 && d->acquire_timeout_ms < t)
+        t = d->acquire_timeout_ms;
+    return t / 4u ? t / 4u : 1u;
+}
+
+/* Lock held. Fault channels parked on an ACQUIRE that is still unmet after
+ * the acquire timeout. A parked channel is off the engine, so it can be torn
+ * down right here; the active one is skipped (the hang check covers it). */
+static void check_acquire_timeouts(gpu_dev_t *d)
+{
+    if (d->acquire_timeout_ms == 0)
+        return;
+    uint64_t now = now_ms();
+    for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++) {
+        channel_t *c = &d->ch[i];
+        if (!atomic_load(&c->open) || atomic_load(&c->status) != GPU_CH_OK ||
+            !c->waiting || d->active == c)
+            continue;
+        if (sem_reached(d->sem[c->wait_sem], c->wait_val))
+            continue;                   /* satisfied, just not rescheduled */
+        if (now - c->wait_since_ms >= d->acquire_timeout_ms) {
+            d->stats.acquire_timeouts++;
+            fault_channel(d, c, GPU_CH_FAULT_ACQUIRE_TIMEOUT);
+        }
+    }
+}
+
 static void *watchdog_main(void *arg)
 {
     gpu_dev_t *d = arg;
-    uint32_t period = d->watchdog_ms / 4u ? d->watchdog_ms / 4u : 1u;
 
     pthread_mutex_lock(&d->lock);
     while (d->running) {
-        struct timespec ts = deadline_after(period);
+        struct timespec ts = deadline_after(watchdog_period(d));
         pthread_cond_timedwait(&d->wd_cv, &d->lock, &ts);
+
+        check_acquire_timeouts(d);
 
         channel_t *c = d->active;
         if (c != NULL && !c->reset_req &&
             now_ms() - d->active_since_ms >= d->watchdog_ms) {
             c->reset_req = true;
-            c->status = GPU_CH_FAULT_TIMEOUT;
+            atomic_store(&c->status, GPU_CH_FAULT_TIMEOUT);  /* submit now -EIO */
             d->stats.watchdog_resets++;
             pthread_cond_broadcast(&d->wd_cv);      /* kick the engine     */
         }
@@ -396,6 +485,14 @@ gpu_dev_t *gpu_create(size_t vram_bytes, uint32_t watchdog_ms)
     d->running     = true;
 
     pthread_mutex_init(&d->lock, NULL);
+    for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++) {
+        channel_t *c = &d->ch[i];
+        atomic_init(&c->open, false);
+        atomic_init(&c->status, GPU_CH_OK);
+        atomic_init(&c->gp_put, 0u);
+        atomic_init(&c->gp_get, 0u);
+        pthread_mutex_init(&c->submit_lock, NULL);
+    }
     init_cond(&d->work_cv);
     init_cond(&d->sem_cv);
     init_cond(&d->idle_cv);
@@ -438,6 +535,8 @@ void gpu_destroy(gpu_dev_t *d)
     pthread_cond_destroy(&d->sem_cv);
     pthread_cond_destroy(&d->idle_cv);
     pthread_cond_destroy(&d->wd_cv);
+    for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++)
+        pthread_mutex_destroy(&d->ch[i].submit_lock);
     pthread_mutex_destroy(&d->lock);
     free(d->vram);
     free(d);
@@ -447,9 +546,10 @@ int gpu_channel_open(gpu_dev_t *d, unsigned *out_ch)
 {
     pthread_mutex_lock(&d->lock);
     for (unsigned i = 0; i < GPU_MAX_CHANNELS; i++) {
-        if (!d->ch[i].open) {
-            memset(&d->ch[i], 0, sizeof(d->ch[i]));
-            d->ch[i].open = true;
+        if (!atomic_load(&d->ch[i].open)) {
+            /* Never opened before (there is no close), so it is still in
+             * its zeroed initial state: just make it visible. */
+            atomic_store(&d->ch[i].open, true);
             *out_ch = i;
             pthread_mutex_unlock(&d->lock);
             return 0;
@@ -464,24 +564,34 @@ int gpu_submit(gpu_dev_t *d, unsigned ch, const gpu_pb_t *pb)
     if (ch >= GPU_MAX_CHANNELS || pb == NULL || pb->n > GPU_PB_MAX_WORDS)
         return -EINVAL;
 
-    pthread_mutex_lock(&d->lock);
     channel_t *c = &d->ch[ch];
-    int rc = 0;
+    if (!atomic_load(&c->open))
+        return -EINVAL;
 
-    if (!c->open)
-        rc = -EINVAL;
-    else if (c->status != GPU_CH_OK)
+    /* Producer side of the SPSC ring. The device lock is not taken to
+     * move the work; only the doorbell below touches it. */
+    pthread_mutex_lock(&c->submit_lock);
+    int rc = 0;
+    /* We are the only writer of GP_PUT (submit_lock), so relaxed is enough. */
+    uint32_t put = atomic_load_explicit(&c->gp_put, memory_order_relaxed);
+    /* ACQUIRE pairs with the engine's RELEASE of GP_GET: once a slot shows
+     * as free, the engine has finished reading it. */
+    uint32_t get = atomic_load_explicit(&c->gp_get, memory_order_acquire);
+
+    if (atomic_load(&c->status) != GPU_CH_OK)
         rc = -EIO;
-    else if (c->gp_put - c->gp_get >= GPU_GPFIFO_ENTRIES)
+    else if (put - get >= GPU_GPFIFO_ENTRIES)       /* wrap-safe distance  */
         rc = -EAGAIN;
     else {
-        gpu_pb_t *slot = &c->fifo[c->gp_put & FIFO_MASK];
+        gpu_pb_t *slot = &c->fifo[put & FIFO_MASK];
         memcpy(slot->w, pb->w, pb->n * sizeof(uint32_t));
         slot->n = pb->n;
-        c->gp_put++;                                /* GP_PUT write        */
-        pthread_cond_signal(&d->work_cv);           /* doorbell            */
+        /* RELEASE publish: the segment above is visible to any thread
+         * that ACQUIRE-loads this GP_PUT value. */
+        atomic_store_explicit(&c->gp_put, put + 1u, memory_order_release);
+        ring_doorbell(d);
     }
-    pthread_mutex_unlock(&d->lock);
+    pthread_mutex_unlock(&c->submit_lock);
     return rc;
 }
 
@@ -525,14 +635,19 @@ int gpu_channel_idle_wait(gpu_dev_t *d, unsigned ch, uint32_t timeout_ms)
 
     pthread_mutex_lock(&d->lock);
     channel_t *c = &d->ch[ch];
-    while (c->gp_get != c->gp_put || d->active == c) {
+    /* A faulted channel is idle once it is off the engine: whatever is left
+     * in its ring is dead work that will never run. */
+    while (d->active == c ||
+           (atomic_load(&c->status) == GPU_CH_OK &&
+            atomic_load_explicit(&c->gp_get, memory_order_acquire) !=
+            atomic_load_explicit(&c->gp_put, memory_order_acquire))) {
         if (!d->running ||
             pthread_cond_timedwait(&d->idle_cv, &d->lock, &dl) == ETIMEDOUT) {
             rc = -ETIMEDOUT;
             break;
         }
     }
-    if (rc == 0 && c->status != GPU_CH_OK)
+    if (rc == 0 && atomic_load(&c->status) != GPU_CH_OK)
         rc = -EIO;
     pthread_mutex_unlock(&d->lock);
     return rc;
@@ -542,31 +657,37 @@ gpu_ch_status_t gpu_channel_status(gpu_dev_t *d, unsigned ch)
 {
     if (ch >= GPU_MAX_CHANNELS)
         return GPU_CH_FAULT_BAD_ADDRESS;
-    pthread_mutex_lock(&d->lock);
-    gpu_ch_status_t s = d->ch[ch].status;
-    pthread_mutex_unlock(&d->lock);
-    return s;
+    return (gpu_ch_status_t)atomic_load(&d->ch[ch].status);
 }
 
 int gpu_channel_recover(gpu_dev_t *d, unsigned ch)
 {
     if (ch >= GPU_MAX_CHANNELS)
         return -EINVAL;
-    pthread_mutex_lock(&d->lock);
     channel_t *c = &d->ch[ch];
+    /* Lock order: submit_lock, then device lock (same as gpu_submit). Holding
+     * submit_lock freezes GP_PUT while the ring is emptied. */
+    pthread_mutex_lock(&c->submit_lock);
+    pthread_mutex_lock(&d->lock);
     int rc = 0;
-    if (!c->open)
+    if (!atomic_load(&c->open))
         rc = -EINVAL;
     else if (d->active == c)
         rc = -EBUSY;                                /* still being torn down */
     else {
-        c->status    = GPU_CH_OK;
-        c->gp_get    = c->gp_put;
+        /* Off the engine and faulted, so the engine will not touch the ring:
+         * discard everything up to GP_PUT, including dead entries published
+         * after the fault, then reopen the channel. */
+        atomic_store_explicit(&c->gp_get,
+                              atomic_load_explicit(&c->gp_put, memory_order_relaxed),
+                              memory_order_release);
         c->cursor    = 0;
         c->waiting   = false;
         c->reset_req = false;
+        atomic_store(&c->status, GPU_CH_OK);
     }
     pthread_mutex_unlock(&d->lock);
+    pthread_mutex_unlock(&c->submit_lock);
     return rc;
 }
 
@@ -584,6 +705,14 @@ int gpu_vram_read(gpu_dev_t *d, uint32_t off, void *dst, uint32_t len)
         return -EINVAL;
     memcpy(dst, d->vram + off, len);
     return 0;
+}
+
+void gpu_set_acquire_timeout(gpu_dev_t *d, uint32_t ms)
+{
+    pthread_mutex_lock(&d->lock);
+    d->acquire_timeout_ms = ms;
+    pthread_cond_broadcast(&d->wd_cv);  /* re-arm the watchdog period now */
+    pthread_mutex_unlock(&d->lock);
 }
 
 void gpu_get_stats(gpu_dev_t *d, gpu_stats_t *out)

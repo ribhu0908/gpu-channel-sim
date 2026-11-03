@@ -306,6 +306,165 @@ static void test_multithreaded_stress(void)
     gpu_destroy(g);
 }
 
+static void sleep_ms(long m)
+{
+    struct timespec ts = { m / 1000, (m % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+}
+
+/* The producer channel faults before it releases, so the consumer's ACQUIRE
+ * can never be met. With an acquire timeout the consumer is faulted in time
+ * instead of waiting forever; a healthy channel keeps running. */
+#define ACQ_MS 100u
+
+static void test_acquire_timeout_dead_producer(void)
+{
+    gpu_dev_t *g = gpu_create(4096, WD_MS);
+    gpu_set_acquire_timeout(g, ACQ_MS);
+    unsigned prod, cons, ok;
+    gpu_channel_open(g, &prod);
+    gpu_channel_open(g, &cons);
+    gpu_channel_open(g, &ok);
+
+    gpu_pb_t pb;
+    uint64_t t0 = ms_now();
+    pb_reset(&pb);
+    pb_sem_acquire(&pb, 30, 1);                 /* waits for prod         */
+    pb_sem_release(&pb, 31, 1);                 /* must never run         */
+    CHECK(gpu_submit(g, cons, &pb) == 0);
+
+    pb_reset(&pb);
+    pb_raw(&pb, (0x77u << 24));                 /* prod faults first...   */
+    pb_sem_release(&pb, 30, 1);                 /* ...so this never runs  */
+    CHECK(gpu_submit(g, prod, &pb) == 0);
+    CHECK(gpu_channel_idle_wait(g, prod, 1000) == -EIO);
+
+    CHECK(gpu_channel_idle_wait(g, cons, 2000) == -EIO);
+    uint64_t waited = ms_now() - t0;
+    CHECK(waited >= ACQ_MS && waited < 5 * ACQ_MS);
+    CHECK(gpu_channel_status(g, cons) == GPU_CH_FAULT_ACQUIRE_TIMEOUT);
+    CHECK(gpu_sem_read(g, 31) == 0);
+    CHECK(gpu_submit(g, cons, &pb) == -EIO);
+
+    pb_reset(&pb);                              /* others unaffected      */
+    pb_sem_release(&pb, 32, 1);
+    CHECK(gpu_submit(g, ok, &pb) == 0);
+    CHECK(gpu_sem_wait(g, 32, 1, 1000) == 0);
+
+    CHECK(gpu_channel_recover(g, cons) == 0);   /* reusable afterwards    */
+    pb_reset(&pb);
+    pb_sem_release(&pb, 33, 1);
+    CHECK(gpu_submit(g, cons, &pb) == 0);
+    CHECK(gpu_sem_wait(g, 33, 1, 1000) == 0);
+
+    gpu_stats_t s;
+    gpu_get_stats(g, &s);
+    CHECK(s.acquire_timeouts == 1 && s.faults == 2 && s.watchdog_resets == 0);
+    gpu_destroy(g);
+}
+
+/* Off by default: a consumer may wait well past any timeout. When on, a
+ * producer that releases within the window does not get its consumer killed. */
+static void test_acquire_timeout_spares_live_waiters(void)
+{
+    gpu_dev_t *g = gpu_create(4096, WD_MS);
+    unsigned prod, cons;
+    gpu_channel_open(g, &prod);
+    gpu_channel_open(g, &cons);
+    gpu_pb_t pb;
+
+    pb_reset(&pb);
+    pb_sem_acquire(&pb, 40, 1);
+    pb_sem_release(&pb, 41, 1);
+    gpu_submit(g, cons, &pb);
+    sleep_ms(3 * ACQ_MS);                       /* long wait, timeout off */
+    CHECK(gpu_channel_status(g, cons) == GPU_CH_OK);
+
+    pb_reset(&pb);
+    pb_sem_release(&pb, 40, 1);
+    gpu_submit(g, prod, &pb);
+    CHECK(gpu_sem_wait(g, 41, 1, 1000) == 0);
+
+    gpu_set_acquire_timeout(g, 3 * ACQ_MS);
+    pb_reset(&pb);
+    pb_sem_acquire(&pb, 42, 1);
+    pb_sem_release(&pb, 43, 1);
+    gpu_submit(g, cons, &pb);
+    sleep_ms(ACQ_MS / 2);                       /* producer is slow, not dead */
+    pb_reset(&pb);
+    pb_sem_release(&pb, 42, 1);
+    gpu_submit(g, prod, &pb);
+    CHECK(gpu_sem_wait(g, 43, 1, 1000) == 0);
+    CHECK(gpu_channel_idle_wait(g, cons, 1000) == 0);
+
+    gpu_stats_t s;
+    gpu_get_stats(g, &s);
+    CHECK(s.acquire_timeouts == 0 && s.faults == 0);
+    gpu_destroy(g);
+}
+
+/* 4 host threads share ONE channel. submit_lock must serialise them into a
+ * single producer: no lost entry, no torn segment, per-thread order kept. */
+#define SHARED_THREADS 4
+#define SHARED_ITERS   300
+
+typedef struct { gpu_dev_t *g; unsigned ch; uint32_t id; uint32_t retries; } shared_arg_t;
+
+static void *shared_worker(void *p)
+{
+    shared_arg_t *a = p;
+    gpu_pb_t pb;
+    for (uint32_t i = 1; i <= SHARED_ITERS; i++) {
+        pb_reset(&pb);
+        pb_fill(&pb, a->id * 64u, (uint8_t)i, 64);
+        pb_sem_release(&pb, a->id, i);          /* must rise monotonically */
+        int rc;
+        while ((rc = gpu_submit(a->g, a->ch, &pb)) == -EAGAIN) {
+            struct timespec ts = { 0, 100000L };    /* 100 us */
+            a->retries++;
+            nanosleep(&ts, NULL);
+        }
+        if (rc != 0)
+            return (void *)1;
+    }
+    return NULL;
+}
+
+static void test_shared_channel_many_producers(void)
+{
+    gpu_dev_t *g = gpu_create(SHARED_THREADS * 64, 500);
+    unsigned ch;
+    gpu_channel_open(g, &ch);
+    pthread_t t[SHARED_THREADS];
+    shared_arg_t a[SHARED_THREADS];
+
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        a[i] = (shared_arg_t){ g, ch, i, 0 };
+        pthread_create(&t[i], NULL, shared_worker, &a[i]);
+    }
+    int errors = 0;
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        errors += r != NULL;
+    }
+    CHECK(errors == 0);
+    CHECK(gpu_channel_idle_wait(g, ch, 5000) == 0);
+
+    for (uint32_t i = 0; i < SHARED_THREADS; i++) {
+        CHECK(gpu_sem_read(g, i) == SHARED_ITERS);
+        uint8_t buf[64];
+        gpu_vram_read(g, i * 64u, buf, sizeof buf);
+        CHECK(buf[0] == (uint8_t)SHARED_ITERS && buf[63] == (uint8_t)SHARED_ITERS);
+    }
+    gpu_stats_t s;
+    gpu_get_stats(g, &s);
+    CHECK(s.entries_done == SHARED_THREADS * SHARED_ITERS);
+    CHECK(s.methods_done == 2u * SHARED_THREADS * SHARED_ITERS);
+    CHECK(s.faults == 0);
+    gpu_destroy(g);
+}
+
 int main(void)
 {
     RUN(test_fill_copy_and_fence);
@@ -316,6 +475,9 @@ int main(void)
     RUN(test_gpfifo_backpressure);
     RUN(test_pushbuffer_builder_bounds);
     RUN(test_multithreaded_stress);
+    RUN(test_shared_channel_many_producers);
+    RUN(test_acquire_timeout_dead_producer);
+    RUN(test_acquire_timeout_spares_live_waiters);
 
     printf("\n%d checks, %d failed\n", g_checks, g_failures);
     return g_failures ? 1 : 0;
